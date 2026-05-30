@@ -130,9 +130,9 @@ test_that("check_sample_match detects mismatch", {
   names(labels) <- paste0("S", 1:4)
 
   # Should pass
-  expect_true(check_sample_match(expr, labels))
+  expect_true(gsmR:::check_sample_match(expr, labels))
 
   # Mismatch
   names(labels) <- paste0("X", 1:4)
-  expect_error(check_sample_match(expr, labels), "do not match")
+  expect_error(gsmR:::check_sample_match(expr, labels), "do not match")
 })

@@ -1,6 +1,7 @@
 #' @title Input readers for GSM expression and grouping data
 #' @description Functions to read expression matrices, grouping files (2-column
 #'   CSV or GMT format), and pre-transposed expression matrices.
+#' @import data.table
 #' @name input
 NULL
 
@@ -19,14 +20,15 @@ NULL
 #'     \item{labels}{Named factor of class labels (names = sample IDs).}
 #'   }
 #' @export
-read_expression <- function(file, class_col = "class", sep = ",") {
+read_expression <- function(file, class_col = "class", sep = ",", sample_id_col = NULL) {
   stopifnot(file.exists(file))
 
   # Use data.table::fread for speed on large files
   dt <- data.table::fread(file, sep = sep, header = TRUE, check.names = FALSE)
 
-  # Extract class labels
+  first_col <- names(dt)[1]
 
+  # Extract class labels
   if (is.character(class_col)) {
     if (!class_col %in% names(dt)) {
       stop("Class column '", class_col, "' not found in file. ",
@@ -39,6 +41,25 @@ read_expression <- function(file, class_col = "class", sep = ",") {
     dt[, (class_col) := NULL, with = FALSE]
   }
 
+  # Detect optional sample ID column
+  if (is.null(sample_id_col) && first_col != class_col) {
+    is_sample_col <- grepl("sample|id|name|patient|subject", first_col, ignore.case = TRUE) ||
+      all(vapply(head(dt[[first_col]], 5), function(val) {
+        (is.character(val) || is.factor(val)) && is.na(suppressWarnings(as.numeric(as.character(val))))
+      }, logical(1)))
+    
+    if (is_sample_col) {
+      sample_id_col <- first_col
+    }
+  }
+
+  if (!is.null(sample_id_col)) {
+    sample_ids <- as.character(dt[[sample_id_col]])
+    dt[, (sample_id_col) := NULL]
+  } else {
+    sample_ids <- paste0("S", seq_len(nrow(dt)))
+  }
+
   # Convert to matrix and transpose (genes x samples)
   mat <- as.matrix(dt)
 
@@ -48,11 +69,7 @@ read_expression <- function(file, class_col = "class", sep = ",") {
     mat <- apply(mat, 2, as.numeric)
   }
 
-  # Create sample IDs
-  sample_ids <- paste0("S", seq_len(nrow(mat)))
-
   # Transpose: genes x samples
-
   expr <- t(mat)
   colnames(expr) <- sample_ids
 
