@@ -31,8 +31,10 @@ build_model <- function(expr, labels, top_groups, train_idx,
   stopifnot(is.list(top_groups) && length(top_groups) > 0)
 
   fn <- switch(method,
-    rf = build_model_rf,
-    stop("Unknown modeling method: '", method, "'. Available: 'rf'.")
+    rf  = build_model_rf,
+    svm = build_model_svm,
+    knn = build_model_knn,
+    stop("Unknown modeling method: '", method, "'. Available: 'rf', 'svm', 'knn'.")
   )
   fn(expr, labels, top_groups, train_idx, ...)
 }
@@ -105,3 +107,139 @@ build_model_rf <- function(expr, labels, top_groups, train_idx, ...) {
     n_groups    = length(top_groups)
   )
 }
+
+
+#' Build an SVM model from top groups
+#'
+#' @param expr Numeric matrix (genes x samples).
+#' @param labels Factor of class labels.
+#' @param top_groups Named list of character vectors.
+#' @param train_idx Integer vector of training sample indices.
+#' @param ... Additional arguments passed to [e1071::svm()].
+#' @return A list with `metrics`, `predictions`, `actual`, `features`,
+#'   and `n_groups`.
+#' @keywords internal
+build_model_svm <- function(expr, labels, top_groups, train_idx, ...) {
+  if (!requireNamespace("e1071", quietly = TRUE)) {
+    stop("Package 'e1071' is required for method 'svm'. ",
+         "Install it with: install.packages('e1071')")
+  }
+
+  test_idx <- setdiff(seq_len(ncol(expr)), train_idx)
+  if (length(test_idx) == 0) {
+    stop("No test samples.")
+  }
+
+  # Combine unique genes from all top groups
+  all_genes <- unique(unlist(top_groups))
+  # Intersect with available genes
+  all_genes <- intersect(all_genes, rownames(expr))
+
+  if (length(all_genes) == 0) {
+    return(list(
+      metrics     = calc_all_metrics(labels[test_idx], labels[test_idx]),
+      predictions = factor(rep(NA, length(test_idx)), levels = levels(labels)),
+      actual      = labels[test_idx],
+      features    = character(0),
+      n_groups    = length(top_groups)
+    ))
+  }
+
+  # Build data frames
+  train_data <- as.data.frame(t(expr[all_genes, train_idx, drop = FALSE]))
+  test_data  <- as.data.frame(t(expr[all_genes, test_idx, drop = FALSE]))
+
+  train_labels <- labels[train_idx]
+  test_labels  <- labels[test_idx]
+
+  # Determine positive class
+  positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
+
+  # Train SVM
+  model <- e1071::svm(
+    x = train_data,
+    y = train_labels,
+    ...
+  )
+
+  # Predict
+  predictions <- stats::predict(model, newdata = test_data)
+
+  # Metrics
+  metrics <- calc_all_metrics(test_labels, predictions, positive_class)
+
+  list(
+    metrics     = metrics,
+    predictions = predictions,
+    actual      = test_labels,
+    features    = all_genes,
+    n_groups    = length(top_groups)
+  )
+}
+
+
+#' Build a KNN model from top groups
+#'
+#' @param expr Numeric matrix (genes x samples).
+#' @param labels Factor of class labels.
+#' @param top_groups Named list of character vectors.
+#' @param train_idx Integer vector of training sample indices.
+#' @param ... Additional arguments passed to [class::knn()].
+#' @return A list with `metrics`, `predictions`, `actual`, `features`,
+#'   and `n_groups`.
+#' @keywords internal
+build_model_knn <- function(expr, labels, top_groups, train_idx, ...) {
+  if (!requireNamespace("class", quietly = TRUE)) {
+    stop("Package 'class' is required for method 'knn'.")
+  }
+
+  test_idx <- setdiff(seq_len(ncol(expr)), train_idx)
+  if (length(test_idx) == 0) {
+    stop("No test samples.")
+  }
+
+  # Combine unique genes from all top groups
+  all_genes <- unique(unlist(top_groups))
+  # Intersect with available genes
+  all_genes <- intersect(all_genes, rownames(expr))
+
+  if (length(all_genes) == 0) {
+    return(list(
+      metrics     = calc_all_metrics(labels[test_idx], labels[test_idx]),
+      predictions = factor(rep(NA, length(test_idx)), levels = levels(labels)),
+      actual      = labels[test_idx],
+      features    = character(0),
+      n_groups    = length(top_groups)
+    ))
+  }
+
+  # Build data frames
+  train_data <- t(expr[all_genes, train_idx, drop = FALSE])
+  test_data  <- t(expr[all_genes, test_idx, drop = FALSE])
+
+  train_labels <- labels[train_idx]
+  test_labels  <- labels[test_idx]
+
+  # Determine positive class
+  positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
+
+  # Predict using KNN (class::knn)
+  predictions <- class::knn(
+    train = train_data,
+    test  = test_data,
+    cl    = train_labels,
+    ...
+  )
+
+  # Metrics
+  metrics <- calc_all_metrics(test_labels, predictions, positive_class)
+
+  list(
+    metrics     = metrics,
+    predictions = predictions,
+    actual      = test_labels,
+    features    = all_genes,
+    n_groups    = length(top_groups)
+  )
+}
+

@@ -12,6 +12,8 @@ run_mccv(
   pre_score_top_percent = 1,
   score_method = "rf",
   model_method = "rf",
+  score_args = list(),
+  model_args = list(),
   cores = NULL,
   seed = 42,
   ...
@@ -31,6 +33,10 @@ run_mccv(
 \item{score_method}{Classifier method for group scoring. Default \code{"rf"}.}
 
 \item{model_method}{Classifier method for final model. Default \code{"rf"}.}
+
+\item{score_args}{Named list of additional arguments passed to the scoring classifier. Default \code{list()}.}
+
+\item{model_args}{Named list of additional arguments passed to the final model classifier. Default \code{list()}.}
 
 \item{cores}{Integer. Number of CPU cores to use. Default is all minus one.}
 

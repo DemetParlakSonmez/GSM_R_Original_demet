@@ -36,8 +36,10 @@ score_group <- function(expr, labels, genes, train_idx,
   }
 
   fn <- switch(method,
-    rf = score_group_rf,
-    stop("Unknown scoring method: '", method, "'. Available: 'rf'.")
+    rf  = score_group_rf,
+    svm = score_group_svm,
+    knn = score_group_knn,
+    stop("Unknown scoring method: '", method, "'. Available: 'rf', 'svm', 'knn'.")
   )
   fn(expr, labels, genes, train_idx, ...)
 }
@@ -92,3 +94,95 @@ score_group_rf <- function(expr, labels, genes, train_idx, ...) {
     actual      = test_labels
   )
 }
+
+
+#' Score a group using SVM
+#'
+#' @param expr Numeric matrix (genes x samples).
+#' @param labels Factor of class labels.
+#' @param genes Character vector of gene names.
+#' @param train_idx Integer vector of training sample indices.
+#' @param ... Additional arguments passed to [e1071::svm()].
+#' @return A list with `accuracy`, `predictions`, and `actual`.
+#' @keywords internal
+score_group_svm <- function(expr, labels, genes, train_idx, ...) {
+  if (!requireNamespace("e1071", quietly = TRUE)) {
+    stop("Package 'e1071' is required for method 'svm'. ",
+         "Install it with: install.packages('e1071')")
+  }
+
+  test_idx <- setdiff(seq_len(ncol(expr)), train_idx)
+  if (length(test_idx) == 0) {
+    stop("No test samples.")
+  }
+
+  train_data <- as.data.frame(t(expr[genes, train_idx, drop = FALSE]))
+  test_data  <- as.data.frame(t(expr[genes, test_idx, drop = FALSE]))
+
+  train_labels <- labels[train_idx]
+  test_labels  <- labels[test_idx]
+
+  # Train SVM
+  model <- e1071::svm(
+    x = train_data,
+    y = train_labels,
+    ...
+  )
+
+  # Predict on test set
+  predictions <- stats::predict(model, newdata = test_data)
+
+  # Calculate accuracy
+  accuracy <- calc_accuracy(test_labels, predictions)
+
+  list(
+    accuracy    = accuracy,
+    predictions = predictions,
+    actual      = test_labels
+  )
+}
+
+
+#' Score a group using KNN
+#'
+#' @param expr Numeric matrix (genes x samples).
+#' @param labels Factor of class labels.
+#' @param genes Character vector of gene names.
+#' @param train_idx Integer vector of training sample indices.
+#' @param ... Additional arguments passed to [class::knn()].
+#' @return A list with `accuracy`, `predictions`, and `actual`.
+#' @keywords internal
+score_group_knn <- function(expr, labels, genes, train_idx, ...) {
+  if (!requireNamespace("class", quietly = TRUE)) {
+    stop("Package 'class' is required for method 'knn'.")
+  }
+
+  test_idx <- setdiff(seq_len(ncol(expr)), train_idx)
+  if (length(test_idx) == 0) {
+    stop("No test samples.")
+  }
+
+  train_data <- t(expr[genes, train_idx, drop = FALSE])
+  test_data  <- t(expr[genes, test_idx, drop = FALSE])
+
+  train_labels <- labels[train_idx]
+  test_labels  <- labels[test_idx]
+
+  # Predict using KNN (class::knn)
+  predictions <- class::knn(
+    train = train_data,
+    test  = test_data,
+    cl    = train_labels,
+    ...
+  )
+
+  # Calculate accuracy
+  accuracy <- calc_accuracy(test_labels, predictions)
+
+  list(
+    accuracy    = accuracy,
+    predictions = predictions,
+    actual      = test_labels
+  )
+}
+

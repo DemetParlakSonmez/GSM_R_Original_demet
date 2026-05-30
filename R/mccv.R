@@ -17,6 +17,8 @@ NULL
 #' @param pre_score_top_percent Percentage of top groups to retain. Default `1`.
 #' @param score_method Classifier method for group scoring. Default `"rf"`.
 #' @param model_method Classifier method for final model. Default `"rf"`.
+#' @param score_args Named list of additional arguments passed to the scoring classifier. Default `list()`.
+#' @param model_args Named list of additional arguments passed to the final model classifier. Default `list()`.
 #' @param cores Integer. Number of CPU cores to use. Default is all minus one.
 #' @param seed Integer. Base random seed for reproducibility. Default `42`.
 #' @param ... Additional arguments passed to model/scoring functions.
@@ -25,10 +27,13 @@ NULL
 run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
                      pre_score_method = "anova", pre_score_top_percent = 1,
                      score_method = "rf", model_method = "rf",
+                     score_args = list(), model_args = list(),
                      cores = NULL, seed = 42, ...) {
   stopifnot(inherits(dataset, "gsm_dataset"))
   stopifnot(is.numeric(n_iterations) && n_iterations > 0)
   stopifnot(is.numeric(train_ratio) && train_ratio > 0 && train_ratio < 1)
+  stopifnot(is.list(score_args))
+  stopifnot(is.list(model_args))
 
   if (is.null(cores)) {
     cores <- max(1, parallel::detectCores() - 1)
@@ -53,12 +58,21 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
       group_scores <- list()
       for (name in names(top_groups)) {
         genes <- top_groups[[name]]
-        score <- score_group(dataset$expr, dataset$labels, genes, split$train, method = score_method)
+        
+        score_args_combined <- c(
+          list(expr = dataset$expr, labels = dataset$labels, genes = genes, train_idx = split$train, method = score_method),
+          score_args
+        )
+        score <- do.call(score_group, score_args_combined)
         group_scores[[name]] <- score$accuracy
       }
       
       # Build final model
-      final_model <- build_model(dataset$expr, dataset$labels, top_groups, split$train, method = model_method)
+      model_args_combined <- c(
+        list(expr = dataset$expr, labels = dataset$labels, top_groups = top_groups, train_idx = split$train, method = model_method),
+        model_args
+      )
+      final_model <- do.call(build_model, model_args_combined)
       
       list(
         fold = i,
@@ -89,10 +103,12 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
     parallel::clusterEvalQ(cl, {
       library(gsmR)
       library(randomForest)
+      library(e1071)
     })
     parallel::clusterExport(cl, c("dataset", "train_ratio", "pre_score_method", 
                                   "pre_score_top_percent", "score_method", 
-                                  "model_method", "seed"), envir = environment())
+                                  "model_method", "seed", "score_args", 
+                                  "model_args"), envir = environment())
     
     results <- parallel::parLapply(cl, seq_len(n_iterations), run_fold)
   } else {
