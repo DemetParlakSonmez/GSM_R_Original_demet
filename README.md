@@ -47,6 +47,26 @@ G-S-M uses a strategy pattern for pluggable backends:
 | Scoring | `score_group()` | Random Forest | SVM (future), etc. |
 | Modeling | `build_model()` | Random Forest | glmnet (future), etc. |
 
+## Shiny App
+
+gsmR includes an interactive web interface. Launch it with:
+
+```r
+library(gsmR)
+run_app()
+```
+
+**Required packages:** `shiny`, `bslib`, `DT` (install with `install.packages(c("shiny", "bslib", "DT"))`).
+
+The app has four tabs:
+
+| Tab | Description |
+|-----|-------------|
+| **📂 Data** | Upload expression & grouping files, explore class distribution and group sizes |
+| **🔁 Replicates** | Upload metadata, collapse technical replicates with provenance tracking |
+| **📊 Pre-Score** | Run ANOVA pre-scoring to filter groups before ML scoring |
+| **🎯 Score** | Score top groups with Random Forest and compare accuracies |
+
 ## References
 
 - Khokhar, M., Bakir-Gungor, B., & Yousef, M. (2025). *Enhancing the Efficiency of the Grouping-Scoring-Modeling Framework with Statistical Pre-Scoring Component for Transcriptomic Data Analysis.* BIOINFORMATICS 2025.
