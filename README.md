@@ -1,73 +1,135 @@
 # gsmR — Grouping-Scoring-Modeling Framework for R
 
-An R implementation of the G-S-M framework for data analysis with prior knowledge,
-migrated from the original KNIME workflow.
+An optimized R implementation of the G-S-M framework for transcriptomic data analysis with biological prior knowledge (e.g. pathways, gene sets, or disease groups). This package extends the original KNIME workflow with high-performance concurrent processing, pluggable machine learning backends, and technical replicate aggregation.
+
+---
+
+## Key Features
+
+- **📂 Replicate Collapsing**: Collapse technical replicates using dynamic aggregation methods (mean, median, sum, first, etc.) with automated sample mapping and provenance tracking.
+- **📊 Statistical Pre-Scoring**: Filter out irrelevant biological groups using fast statistical tests (One-Way ANOVA) before executing expensive machine learning runs.
+- **⚡ Parallel Monte Carlo Cross-Validation (MCCV)**: Run multi-core stratified CV folds concurrently utilizing multi-process socket clusters on Windows and process-forking (`mclapply`) on Unix/macOS.
+- **🎯 Pluggable ML Backends**: Seamlessly train and score groups using **Random Forest (RF)**, **Support Vector Machines (SVM)** (via `e1071`), or **K-Nearest Neighbors (KNN)** (via `class`) with dynamic hyperparameter forwarding via R's `...` ellipsis.
+- **🖥️ Upgraded Shiny GUI Dashboard**: An interactive, dark-themed dashboard to load data, collapse replicates, pre-score pathways, score individual groups, or launch parallel MCCV runs with visual fold boxplots and stability rankings.
+
+---
 
 ## Installation
 
-```r
-# Install from local source
-devtools::install("path/to/GSM4R")
+To install and compile the R package locally along with all required machine learning and visual dependencies, execute the following commands in your R console:
 
-# Or from GitHub
-# remotes::install_github("jallmer/GSM4R")
+```r
+# 1. Install devtools or remotes if not already present
+if (!requireNamespace("remotes", quietly = TRUE)) {
+  install.packages("remotes")
+}
+
+# 2. Install package dependencies
+install.packages(c("shiny", "bslib", "DT", "data.table", "randomForest", "e1071"))
+
+# 3. Install gsmR from local source
+remotes::install_local("path/to/GSM4R", dependencies = TRUE, force = TRUE)
 ```
 
-## Quick Start
+---
 
+## Quick Start (R Console)
+
+### 1. Load Data & Build Dataset
 ```r
 library(gsmR)
 
-# 1. Read data
-expr_data <- read_expression("GDS3257.csv")
-groups    <- read_groups("cancer-DisGeNET_gedinet.csv")
+# Read expression CSV (first column = class/labels, subsequent columns = genes/samples)
+expr_data <- read_expression("example_input_files/GDS3257.csv", class_col = "class")
 
-# 2. Construct validated dataset
+# Read biological groupings CSV (columns: gene, group)
+groups <- read_groups("example_grouping_files/cancer-DisGeNET_gedinet.csv")
+
+# Create validated G-S-M dataset object
 ds <- gsm_dataset(
   expr   = expr_data$expr,
   labels = expr_data$labels,
-  groups = groups
+  groups = groups,
+  min_group_size = 5,
+  max_group_size = 500
 )
-
-# 3. Pre-score groups (optional — select top 20% by ANOVA)
-top_groups <- pre_score_groups(ds, train_idx = 1:80, method = "anova", top_percent = 20)
-
-# 4. Score individual groups with Random Forest
-score <- score_group(ds$expr, ds$labels, genes = ds$groups[["Glioblastoma"]],
-                     train_idx = 1:80, method = "rf")
 ```
 
-## Architecture
+### 2. Pre-Score and Rank Groups
+Filter out less significant groups using statistical pre-scoring (retaining the top 20%):
+```r
+train_idx <- 1:80
+top_groups <- pre_score_groups(ds, train_idx = train_idx, method = "anova", top_percent = 20)
+```
 
-G-S-M uses a strategy pattern for pluggable backends:
+### 3. Score a Single Group (with Pluggable Classifiers)
+```r
+# A. Score using Random Forest (Default)
+score_rf <- score_group(ds$expr, ds$labels, genes = ds$groups[["Glioblastoma"]], 
+                        train_idx = train_idx, method = "rf", ntree = 100)
 
-| Step | Function | Default | Alternatives |
-|------|----------|---------|--------------|
-| Pre-Scoring | `pre_score_groups()` | ANOVA | limma (future), none |
-| Scoring | `score_group()` | Random Forest | SVM (future), etc. |
-| Modeling | `build_model()` | Random Forest | glmnet (future), etc. |
+# B. Score using SVM (Linear Kernel, Cost = 5)
+score_svm <- score_group(ds$expr, ds$labels, genes = ds$groups[["Glioblastoma"]], 
+                         train_idx = train_idx, method = "svm", kernel = "linear", cost = 5)
 
-## Shiny App
+# C. Score using K-Nearest Neighbors (k = 5)
+score_knn <- score_group(ds$expr, ds$labels, genes = ds$groups[["Glioblastoma"]], 
+                         train_idx = train_idx, method = "knn", k = 5)
+```
 
-gsmR includes an interactive web interface. Launch it with:
+### 4. Run High-Performance Parallel MCCV
+Execute 10-fold Monte Carlo cross-validation concurrently on 10 cores using **SVM** for scoring and **Random Forest** for final joint model building:
+```r
+mccv_results <- run_mccv(
+  dataset               = ds,
+  n_iterations          = 10,
+  train_ratio           = 0.7,
+  pre_score_method      = "anova",
+  pre_score_top_percent = 20,
+  score_method          = "svm",
+  model_method          = "rf",
+  score_args            = list(kernel = "linear", cost = 1),
+  model_args            = list(ntree = 500),
+  cores                 = 10,
+  seed                  = 42
+)
+
+# Access aggregate metrics across all folds
+print(mccv_results$metrics_summary)
+```
+
+---
+
+## Interactive Shiny GUI Dashboard
+
+gsmR contains a premium web-based interface built with modern bootstrap glassmorphism styling. Launch the application locally using:
 
 ```r
 library(gsmR)
 run_app()
 ```
 
-**Required packages:** `shiny`, `bslib`, `DT` (install with `install.packages(c("shiny", "bslib", "DT"))`).
+### Dashboard Tabs Overview
 
-The app has four tabs:
+1. **📂 Data Tab**: Upload your expression matrix and prior biological knowledge files. Instantaneously explores class distributions and group sizes with clean charts.
+2. **🔁 Replicates Tab**: Optionally upload metadata to resolve technical replicates. Automatically collapses duplicate entries via your chosen aggregation statistic with complete provenance tables.
+3. **📊 Pre-Score Tab**: Run training-stratified ANOVA tests to prune the pathway list, increasing signal-to-noise ratio.
+4. **🎯 Score Tab**: The central command center:
+   - Toggle **Single Fold Mode** to rank top pathways and build a consolidated joint model using **RF**, **SVM**, or **KNN**.
+   - Toggle **Parallel MCCV Mode** to execute multi-core CV runs in the background. Generates aggregate summary sheets, fold-performance boxplots, and ranked group stability list (runner-ups analysis).
 
-| Tab | Description |
-|-----|-------------|
-| **📂 Data** | Upload expression & grouping files, explore class distribution and group sizes |
-| **🔁 Replicates** | Upload metadata, collapse technical replicates with provenance tracking |
-| **📊 Pre-Score** | Run ANOVA pre-scoring to filter groups before ML scoring |
-| **🎯 Score** | Score top groups with Random Forest and compare accuracies |
+---
 
-## References
+## Developer Verification & Standalone Scripts
+
+The `tests/` directory contains targeted R scripts to perform deep analytical investigations:
+- **`benchmark-svm.R`**: Times and evaluates multi-core linear SVM performance on real GDS3257 data.
+- **`convergence-analysis.R`**: Iteratively aggregates results from multiple MCCV folds to determine after how many iterations the top-performing groups reach consensus stability.
+- **`runner-ups-analysis.R`**: Calculates group-by-group metrics (appearance rate in Top 10, average rank, average accuracy) across all cross-validation folds.
+
+---
+
+## Citation & References
 
 - Khokhar, M., Bakir-Gungor, B., & Yousef, M. (2025). *Enhancing the Efficiency of the Grouping-Scoring-Modeling Framework with Statistical Pre-Scoring Component for Transcriptomic Data Analysis.* BIOINFORMATICS 2025.
   DOI: [10.5220/0013192600003911](https://doi.org/10.5220/0013192600003911)

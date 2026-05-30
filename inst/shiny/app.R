@@ -226,33 +226,129 @@ ui <- page_navbar(
         title = "Scoring Settings",
         width = 340,
         selectInput("score_method", "Classifier",
-                    choices = c("Random Forest" = "rf")),
+                    choices = c("Random Forest" = "rf",
+                                "Support Vector Machine" = "svm",
+                                "K-Nearest Neighbors" = "knn")),
+        
+        # Hyperparameters for Random Forest
+        conditionalPanel(
+          condition = "input.score_method == 'rf'",
+          numericInput("rf_ntree", "Number of Trees (ntree)", value = 500, min = 1, step = 50)
+        ),
+        
+        # Hyperparameters for SVM
+        conditionalPanel(
+          condition = "input.score_method == 'svm'",
+          selectInput("svm_kernel", "SVM Kernel",
+                      choices = c("Linear" = "linear",
+                                  "Radial" = "radial",
+                                  "Polynomial" = "polynomial",
+                                  "Sigmoid" = "sigmoid"),
+                      selected = "linear"),
+          numericInput("svm_cost", "Cost (C)", value = 1, min = 0.001, step = 0.5),
+          numericInput("svm_gamma", "Gamma (non-linear only)", value = 0.1, min = 0.0001, step = 0.01)
+        ),
+        
+        # Hyperparameters for KNN
+        conditionalPanel(
+          condition = "input.score_method == 'knn'",
+          numericInput("knn_k", "Neighbors (k)", value = 3, min = 1, max = 20, step = 1)
+        ),
+        
         numericInput("n_top_groups", "Score top N groups", value = 10, min = 1),
         numericInput("score_seed", "Random seed", value = 42),
+        
         tags$hr(),
-        actionButton("btn_score", "\U0001F3AF Score Groups",
+        checkboxInput("run_mccv_mode", "Run Multi-Fold Parallel MCCV?", value = FALSE),
+        
+        # Parallel MCCV options
+        conditionalPanel(
+          condition = "input.run_mccv_mode",
+          numericInput("mccv_iterations", "MCCV Iterations", value = 10, min = 1, max = 500),
+          sliderInput("mccv_cores", "CPU Cores", min = 1, max = parallel::detectCores(), 
+                      value = max(1, parallel::detectCores() - 1), step = 1),
+          selectInput("model_method", "Final Modeling Classifier",
+                      choices = c("Same as Scoring" = "same",
+                                  "Random Forest" = "rf",
+                                  "Support Vector Machine" = "svm",
+                                  "K-Nearest Neighbors" = "knn"),
+                      selected = "same"),
+          sliderInput("mccv_train_ratio", "Training Ratio", min = 0.5, max = 0.9, value = 0.7, step = 0.05)
+        ),
+        
+        tags$hr(),
+        actionButton("btn_score", "\U0001F680 Run Analysis",
                      class = "btn-primary btn-lg w-100"),
         tags$hr(),
-        tags$small(class = "text-muted",
-                   "Requires the 'randomForest' package.")
+        uiOutput("tab4_dependencies")
       ),
+      
+      # Main Panel Results Conditional Displays
       conditionalPanel(
         condition = "output.score_done",
-        card(
-          card_header("Group Scores (by Accuracy)"),
-          DTOutput("score_table")
+        
+        # Display Single Fold Mode Results
+        conditionalPanel(
+          condition = "!input.run_mccv_mode",
+          layout_columns(
+            col_widths = c(6, 6),
+            card(
+              card_header("Group Scores (by Accuracy)"),
+              DTOutput("score_table")
+            ),
+            card(
+              card_header("Score Distribution"),
+              plotOutput("plot_scores", height = "300px")
+            )
+          ),
+          card(
+            card_header("Final Joint Model Performance (Combined Top Features)"),
+            layout_columns(
+              col_widths = c(4, 4, 4),
+              uiOutput("model_vbox_acc"),
+              uiOutput("model_vbox_kappa"),
+              uiOutput("model_vbox_sens")
+            ),
+            layout_columns(
+              col_widths = c(4, 4, 4),
+              uiOutput("model_vbox_spec"),
+              uiOutput("model_vbox_prec"),
+              uiOutput("model_vbox_f1")
+            )
+          )
         ),
-        card(
-          card_header("Score Distribution"),
-          plotOutput("plot_scores", height = "300px")
+        
+        # Display Parallel MCCV Mode Results
+        conditionalPanel(
+          condition = "input.run_mccv_mode",
+          card(
+            card_header("Parallel MCCV Performance Summary (Aggregate)"),
+            DTOutput("mccv_summary_table")
+          ),
+          layout_columns(
+            col_widths = c(6, 6),
+            card(
+              card_header("MCCV Folds Performance Visualizer"),
+              plotOutput("plot_mccv_folds", height = "350px")
+            ),
+            card(
+              card_header("Average Group Accuracy (Top 10 Stable)"),
+              plotOutput("plot_mccv_groups", height = "350px")
+            )
+          ),
+          card(
+            card_header("Group Stability & Accuracies (All Scored Groups)"),
+            DTOutput("mccv_stability_table")
+          )
         )
       ),
+      
       conditionalPanel(
         condition = "!output.score_done",
         tags$div(
           style = "text-align:center; padding:80px 20px; opacity:0.5;",
-          tags$h3("\U0001F3AF Score individual groups"),
-          tags$p("Run pre-scoring first, then score top groups with a classifier.")
+          tags$h3("\U0001F3AF Run scoring or parallel MCCV analysis"),
+          tags$p("Select your classifier and parameters, then click 'Run Analysis' to see results.")
         )
       )
     )
@@ -547,46 +643,159 @@ server <- function(input, output, session) {
   # ══════════════════════════════════════════════════════════════════════
   # Tab 4: Scoring
   # ══════════════════════════════════════════════════════════════════════
+  
+  # Dynamic package requirements notice in sidebar
+  output$tab4_dependencies <- renderUI({
+    req_pkg <- if (input$score_method == "rf") {
+      "randomForest"
+    } else if (input$score_method == "svm") {
+      "e1071"
+    } else {
+      "class (core)"
+    }
+    tags$small(class = "text-muted", paste("Requires package:", req_pkg))
+  })
+
   observeEvent(input$btn_score, {
     req(rv$prescored, rv$train_idx)
 
-    if (!requireNamespace("randomForest", quietly = TRUE)) {
-      showNotification("\u274C Package 'randomForest' required. Install with: install.packages('randomForest')",
-                       type = "error", duration = 10)
-      return()
+    # 1. Package dependency validation
+    methods_to_check <- unique(c(input$score_method, 
+                                 if (input$run_mccv_mode && input$model_method != "same") input$model_method else input$score_method))
+    for (m in methods_to_check) {
+      if (m == "rf" && !requireNamespace("randomForest", quietly = TRUE)) {
+        showNotification("\u274C Package 'randomForest' required. Install with: install.packages('randomForest')",
+                         type = "error", duration = 10)
+        return()
+      }
+      if (m == "svm" && !requireNamespace("e1071", quietly = TRUE)) {
+        showNotification("\u274C Package 'e1071' required. Install with: install.packages('e1071')",
+                         type = "error", duration = 10)
+        return()
+      }
+      if (m == "knn" && !requireNamespace("class", quietly = TRUE)) {
+        showNotification("\u274C Package 'class' required.",
+                         type = "error", duration = 10)
+        return()
+      }
+    }
+
+    # 2. Extract classifier arguments
+    score_args <- list()
+    if (input$score_method == "rf") {
+      score_args <- list(ntree = input$rf_ntree)
+    } else if (input$score_method == "svm") {
+      score_args <- list(kernel = input$svm_kernel, cost = input$svm_cost, gamma = input$svm_gamma)
+    } else if (input$score_method == "knn") {
+      score_args <- list(k = input$knn_k)
     }
 
     tryCatch({
-      groups_to_score <- rv$prescore_groups
-      n <- min(input$n_top_groups, length(groups_to_score))
-      groups_to_score <- groups_to_score[seq_len(n)]
+      # Reset previous state
+      rv$score_results <- NULL
+      rv$final_model <- NULL
+      rv$mccv_results <- NULL
+      rv$scored <- FALSE
 
-      results <- list()
-      withProgress(message = "Scoring groups...", value = 0, {
-        for (i in seq_along(groups_to_score)) {
-          gname <- names(groups_to_score)[i]
-          setProgress(i / n, detail = paste0(gname, " (", i, "/", n, ")"))
+      if (!input$run_mccv_mode) {
+        # ── SINGLE FOLD SCORING ─────────────────────────────────────────────
+        groups_to_score <- rv$prescore_groups
+        n <- min(input$n_top_groups, length(groups_to_score))
+        groups_to_score <- groups_to_score[seq_len(n)]
 
-          set.seed(input$score_seed)
-          res <- score_group(
-            rv$dataset$expr, rv$dataset$labels,
-            genes     = groups_to_score[[i]],
-            train_idx = rv$train_idx,
-            method    = input$score_method
+        results <- list()
+        withProgress(message = "Scoring groups...", value = 0, {
+          for (i in seq_along(groups_to_score)) {
+            gname <- names(groups_to_score)[i]
+            setProgress(i / n, detail = paste0(gname, " (", i, "/", n, ")"))
+
+            set.seed(input$score_seed)
+            score_args_combined <- c(
+              list(
+                expr      = rv$dataset$expr,
+                labels    = rv$dataset$labels,
+                genes     = groups_to_score[[i]],
+                train_idx = rv$train_idx,
+                method    = input$score_method
+              ),
+              score_args
+            )
+            res <- do.call(score_group, score_args_combined)
+            results[[gname]] <- res
+          }
+          
+          setProgress(0.9, detail = "Building final joint model...")
+          
+          # Build final joint model on combined top features
+          m_method <- input$score_method
+          m_args <- score_args
+          
+          model_args_combined <- c(
+            list(
+              expr       = rv$dataset$expr,
+              labels     = rv$dataset$labels,
+              top_groups = groups_to_score,
+              train_idx  = rv$train_idx,
+              method     = m_method
+            ),
+            m_args
           )
-          results[[gname]] <- res
+          final_model <- do.call(build_model, model_args_combined)
+          
+          rv$final_model <- final_model
+          rv$score_results <- results
+          rv$scored <- TRUE
+          setProgress(1.0, detail = "Done!")
+        })
+        
+        showNotification(paste0("\u2705 Scored ", n, " groups and built final model!"), type = "message")
+      } else {
+        # ── PARALLEL MULTI-FOLD MCCV ────────────────────────────────────────
+        m_method <- if (input$model_method == "same") input$score_method else input$model_method
+        # Determine modeling arguments
+        model_args <- list()
+        if (m_method == "rf") {
+          model_args <- list(ntree = input$rf_ntree)
+        } else if (m_method == "svm") {
+          model_args <- list(kernel = input$svm_kernel, cost = input$svm_cost, gamma = input$svm_gamma)
+        } else if (m_method == "knn") {
+          model_args <- list(k = input$knn_k)
         }
-      })
 
-      rv$score_results <- results
-      rv$scored <- TRUE
-      showNotification(paste0("\u2705 Scored ", n, " groups!"), type = "message")
+        withProgress(message = "Executing Parallel MCCV...", value = 0.1, {
+          setProgress(0.3, detail = sprintf("Running %d iterations across %d cores...", 
+                                             input$mccv_iterations, input$mccv_cores))
+          
+          mccv_res <- run_mccv(
+            dataset               = rv$dataset,
+            n_iterations          = input$mccv_iterations,
+            train_ratio           = input$mccv_train_ratio,
+            pre_score_method      = input$prescore_method,
+            pre_score_top_percent = input$top_percent,
+            score_method          = input$score_method,
+            model_method          = m_method,
+            score_args            = score_args,
+            model_args            = model_args,
+            cores                 = input$mccv_cores,
+            seed                  = input$score_seed
+          )
+          
+          rv$mccv_results <- mccv_res
+          rv$scored <- TRUE
+          setProgress(1.0, detail = "Done!")
+        })
+        
+        showNotification(sprintf("\u2705 Parallel MCCV finished %d iterations successfully!", 
+                                 sum(vapply(mccv_res$folds, \(x) x$status == "success", logical(1)))), 
+                         type = "message")
+      }
     }, error = function(e) {
-      showNotification(paste("\u274C Error:", e$message), type = "error",
+      showNotification(paste("\u274C Error during execution:", e$message), type = "error",
                        duration = 10)
     })
   })
 
+  # Single Fold Renderers: Group Scores Table
   output$score_table <- renderDT({
     req(rv$score_results)
     df <- data.frame(
@@ -609,6 +818,7 @@ server <- function(input, output, session) {
                   backgroundPosition = "center")
   })
 
+  # Single Fold Renderers: Barplot distribution
   output$plot_scores <- renderPlot({
     req(rv$score_results)
     accs <- vapply(rv$score_results, \(x) x$accuracy, numeric(1))
@@ -619,6 +829,139 @@ server <- function(input, output, session) {
                   main = "", ylab = "Accuracy", las = 2, ylim = c(0, 1),
                   names.arg = names(accs), cex.names = 0.7)
     abline(h = 0.5, col = "#888", lty = 2)
+  }, bg = "transparent")
+
+  # Single Fold Renderers: Final Joint Model Value Boxes
+  output$model_vbox_acc <- renderUI({
+    req(rv$final_model)
+    value_box_ui(paste0(round(rv$final_model$metrics$Accuracy * 100, 2), "%"), "Model Accuracy", "\U0001F3AF")
+  })
+  output$model_vbox_kappa <- renderUI({
+    req(rv$final_model)
+    value_box_ui(round(rv$final_model$metrics$Cohens_kappa, 4), "Cohen's Kappa", "\u2705")
+  })
+  output$model_vbox_sens <- renderUI({
+    req(rv$final_model)
+    value_box_ui(paste0(round(rv$final_model$metrics$Sensitivity * 100, 2), "%"), "Sensitivity (TPR)", "\u23E9")
+  })
+  output$model_vbox_spec <- renderUI({
+    req(rv$final_model)
+    value_box_ui(paste0(round(rv$final_model$metrics$Specificity * 100, 2), "%"), "Specificity (TNR)", "\u23EA")
+  })
+  output$model_vbox_prec <- renderUI({
+    req(rv$final_model)
+    val <- rv$final_model$metrics$Precision
+    if (is.null(val) || is.na(val)) val <- 0
+    value_box_ui(paste0(round(val * 100, 2), "%"), "Precision", "\U0001F3F7\uFE0F")
+  })
+  output$model_vbox_f1 <- renderUI({
+    req(rv$final_model)
+    val <- rv$final_model$metrics$F_measure
+    if (is.null(val) || is.na(val)) val <- 0
+    value_box_ui(paste0(round(val * 100, 2), "%"), "F-Measure", "\U0001F4CA")
+  })
+
+  # Parallel MCCV Renderers: Summary statistics table
+  output$mccv_summary_table <- renderDT({
+    req(rv$mccv_results)
+    df <- rv$mccv_results$metrics_summary
+    df$Metric <- rownames(df)
+    df <- df[, c("Metric", "Mean", "SD")]
+    df$Mean <- round(df$Mean, 4)
+    df$SD <- round(df$SD, 4)
+    datatable(df, options = list(
+      dom = "t",
+      initComplete = JS("function(settings, json) {",
+                         "$(this.api().table().header()).css({'color': '#ccc'});",
+                         "}")
+    ), rownames = FALSE, class = "compact stripe")
+  })
+
+  # Parallel MCCV Renderers: Metrics spread boxplot
+  output$plot_mccv_folds <- renderPlot({
+    req(rv$mccv_results)
+    df <- rv$mccv_results$raw_metrics
+    par(bg = "transparent", col.axis = "#aaa", col.lab = "#aaa",
+        col.main = "#ccc", fg = "#555", mar = c(6, 4, 2, 1))
+    boxplot(df, col = c("#4a90d9", "#e06666", "#6aa84f", "#f1c232", "#8e7cc3", "#e06666"),
+            border = "#ccc", las = 2, main = "", ylab = "Value", ylim = c(0, 1))
+  }, bg = "transparent")
+
+  # Parallel MCCV Renderers: Stability ranking table
+  output$mccv_stability_table <- renderDT({
+    req(rv$mccv_results)
+    mccv_res <- rv$mccv_results
+    
+    group_performance <- list()
+    successful_folds <- Filter(function(res) res$status == "success", mccv_res$folds)
+    n_success <- length(successful_folds)
+    
+    if (n_success == 0) return(NULL)
+    
+    for (i in seq_along(successful_folds)) {
+      fold_res <- successful_folds[[i]]
+      accs <- unlist(fold_res$group_accuracies)
+      ranks <- rank(-accs, ties.method = "min")
+      
+      for (gname in names(accs)) {
+        if (is.null(group_performance[[gname]])) {
+          group_performance[[gname]] <- list(
+            accuracies = numeric(0),
+            ranks = numeric(0),
+            in_top_10 = 0
+          )
+        }
+        group_performance[[gname]]$accuracies <- c(group_performance[[gname]]$accuracies, accs[gname])
+        group_performance[[gname]]$ranks <- c(group_performance[[gname]]$ranks, ranks[gname])
+        if (ranks[gname] <= 10) {
+          group_performance[[gname]]$in_top_10 <- group_performance[[gname]]$in_top_10 + 1
+        }
+      }
+    }
+    
+    summary_list <- list()
+    for (gname in names(group_performance)) {
+      perf <- group_performance[[gname]]
+      summary_list[[gname]] <- data.frame(
+        Group = gname,
+        Folds_Evaluated = length(perf$accuracies),
+        Top_10_Appearances = perf$in_top_10,
+        Appearance_Rate = round((perf$in_top_10 / n_success) * 100, 1),
+        Mean_Accuracy = round(mean(perf$accuracies) * 100, 2),
+        Mean_Rank = round(mean(perf$ranks), 1),
+        stringsAsFactors = FALSE
+      )
+    }
+    
+    summary_df <- do.call(rbind, summary_list)
+    sorted_summary <- summary_df[order(-summary_df$Top_10_Appearances, -summary_df$Mean_Accuracy, summary_df$Mean_Rank), ]
+    rv$mccv_group_summary <- sorted_summary
+    
+    datatable(sorted_summary, options = list(
+      pageLength = 10, scrollX = TRUE, dom = "ftp"
+    ), rownames = FALSE, class = "compact stripe") |>
+      formatStyle("Mean_Accuracy",
+                  background = styleColorBar(c(0, 100), "#4a90d9"),
+                  backgroundSize = "90% 70%",
+                  backgroundRepeat = "no-repeat",
+                  backgroundPosition = "center")
+  })
+
+  # Parallel MCCV Renderers: Stability top groups barplot
+  output$plot_mccv_groups <- renderPlot({
+    req(rv$mccv_group_summary)
+    df <- rv$mccv_group_summary
+    top_n <- min(10, nrow(df))
+    df_sub <- df[seq_len(top_n), ]
+    
+    accs <- df_sub$Mean_Accuracy
+    names(accs) <- df_sub$Group
+    
+    par(bg = "transparent", col.axis = "#aaa", col.lab = "#aaa",
+        col.main = "#ccc", fg = "#555", mar = c(8, 4, 2, 1))
+    bp <- barplot(accs, col = "#4a90d9", border = NA,
+                  main = "", ylab = "Mean Accuracy (%)", las = 2, ylim = c(0, 100))
+    abline(h = 50, col = "#888", lty = 2)
   }, bg = "transparent")
 }
 
