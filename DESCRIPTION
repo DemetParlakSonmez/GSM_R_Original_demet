@@ -1,0 +1,34 @@
+Package: gsmR
+Title: Grouping-Scoring-Modeling Framework for Transcriptomic Data
+Version: 0.1.0
+Authors@R: c(
+    person("Malik", "Yousef", email = "malik.yousef@gmail.com", role = c("aut")),
+    person("Maham", "Khokhar", email = "mahamkhokar96@gmail.com", role = c("aut")),
+    person("Burcu", "Bakir-Gungor", role = c("aut")),
+    person("Jens", "Allmer", role = c("cre", "aut"))
+  )
+Description: An R implementation of the Grouping-Scoring-Modeling (G-S-M)
+    framework for transcriptomic data analysis. Groups genes based on prior
+    biological knowledge (e.g. disease associations, pathways), scores groups
+    using machine learning classifiers, and builds predictive models from
+    top-ranked groups. Supports Monte Carlo cross-validation with pluggable
+    backends for pre-scoring, scoring, and modeling steps.
+License: MIT + file LICENSE
+URL: https://github.com/malikyousef/Groups-Filtering-Scoring-in-G-S-M-
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Depends:
+    R (>= 4.1.0)
+Imports:
+    data.table,
+    stats,
+    utils
+Suggests:
+    testthat (>= 3.0.0),
+    randomForest,
+    caret,
+    openxlsx,
+    knitr,
+    rmarkdown
+Config/testthat/edition: 3
