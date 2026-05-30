@@ -3,6 +3,7 @@
 export(build_model)
 export(calc_accuracy)
 export(collapse_replicates)
+export(run_app)
 export(calc_all_metrics)
 export(calc_cohens_kappa)
 export(calc_f_measure)

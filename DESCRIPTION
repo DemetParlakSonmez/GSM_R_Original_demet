@@ -28,6 +28,9 @@ Suggests:
     testthat (>= 3.0.0),
     randomForest,
     caret,
+    shiny,
+    bslib,
+    DT,
     openxlsx,
     knitr,
     rmarkdown

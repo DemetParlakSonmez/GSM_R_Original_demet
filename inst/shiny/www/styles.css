@@ -1,0 +1,112 @@
+/* gsmR Shiny App — Custom Styles */
+
+/* ── Value boxes ────────────────────────────────────────────────────────── */
+.value-box {
+  border-radius: 12px;
+  padding: 18px 22px;
+  margin-bottom: 14px;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.value-box:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.3);
+}
+.value-box .value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #e0e0ff;
+  line-height: 1.2;
+}
+.value-box .label {
+  font-size: 0.85rem;
+  color: #8888aa;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 4px;
+}
+
+/* ── Cards ──────────────────────────────────────────────────────────────── */
+.card, .bslib-card {
+  border-radius: 12px !important;
+  border: 1px solid rgba(255,255,255,0.06) !important;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15) !important;
+}
+
+/* ── Upload area ────────────────────────────────────────────────────────── */
+.upload-area {
+  border: 2px dashed rgba(120,120,200,0.3);
+  border-radius: 12px;
+  padding: 30px 20px;
+  text-align: center;
+  background: rgba(255,255,255,0.02);
+  transition: border-color 0.3s ease, background 0.3s ease;
+}
+.upload-area:hover {
+  border-color: rgba(120,120,200,0.6);
+  background: rgba(255,255,255,0.04);
+}
+
+/* ── Status badges ──────────────────────────────────────────────────────── */
+.badge-success {
+  background: linear-gradient(135deg, #0f9b58, #0d8043);
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.8rem;
+}
+.badge-warning {
+  background: linear-gradient(135deg, #f4a623, #e09000);
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.8rem;
+}
+.badge-info {
+  background: linear-gradient(135deg, #4a90d9, #2d6cb5);
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.8rem;
+}
+
+/* ── Sidebar refinements ────────────────────────────────────────────────── */
+.sidebar .form-group {
+  margin-bottom: 16px;
+}
+
+/* ── Provenance table ───────────────────────────────────────────────────── */
+.provenance-table {
+  font-size: 0.85rem;
+}
+
+/* ── Smooth transitions ─────────────────────────────────────────────────── */
+.tab-pane {
+  animation: fadeIn 0.3s ease-in;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Progress indicator ─────────────────────────────────────────────────── */
+.progress-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  margin-right: 8px;
+}
+.progress-step.done {
+  background: rgba(15,155,88,0.15);
+  color: #4caf50;
+}
+.progress-step.active {
+  background: rgba(74,144,217,0.15);
+  color: #64b5f6;
+}
+.progress-step.pending {
+  background: rgba(255,255,255,0.05);
+  color: #666;
+}
