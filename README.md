@@ -1,6 +1,6 @@
-# gsmR — Grouping-Scoring-Modeling Framework for Transcriptomic Data
+# gsmR — Grouping-Scoring-Modeling Framework for R
 
-An R implementation of the G-S-M framework for transcriptomic data analysis,
+An R implementation of the G-S-M framework for data analysis with prior knowledge,
 migrated from the original KNIME workflow.
 
 ## Installation
