@@ -5,3 +5,6 @@
 ^_pkgdown\.yml$
 ^docs$
 ^pkgdown$
+^example_input_files$
+^example_grouping_files$
+^\.gitattributes$
