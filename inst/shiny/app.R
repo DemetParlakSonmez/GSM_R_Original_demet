@@ -54,6 +54,16 @@ value_box_ui <- function(value, label, icon = NULL) {
 # Null-coalescing helper (base R only ships %||% from 4.4.0).
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
+# Friendly classifier name + a "key = value" string of its hyperparameters.
+classifier_label <- function(method) {
+  switch(method, rf = "Random Forest", svm = "Support Vector Machine",
+         knn = "K-Nearest Neighbors", method)
+}
+format_params <- function(args) {
+  if (length(args) == 0) return("defaults")
+  paste(sprintf("%s = %s", names(args), unlist(args)), collapse = ", ")
+}
+
 # Human-readable elapsed time, reported in minutes or hours (seconds for short runs).
 format_duration <- function(secs) {
   if (is.null(secs) || is.na(secs)) return("—")
@@ -94,8 +104,23 @@ ui <- page_navbar(
   header = tags$head(
     tags$link(rel = "stylesheet", href = "styles.css"),
     tags$style(HTML("
-      .navbar { border-bottom: 1px solid rgba(255,255,255,0.06); }
-      .nav-link.active { border-bottom: 2px solid #4a90d9 !important; }
+      /* Pin the navbar so the tabs stay visible while scrolling. */
+      .navbar {
+        position: sticky; top: 0; z-index: 1030;
+        border-bottom: 1px solid rgba(255,255,255,0.12);
+      }
+      /* Make the nav tabs clearly legible at all times (not faint). */
+      .navbar-nav .nav-link {
+        color: rgba(255,255,255,0.9) !important;
+        opacity: 1 !important;
+        font-weight: 500;
+      }
+      .navbar-nav .nav-link:hover { color: #ffffff !important; }
+      .navbar-nav .nav-link.active {
+        color: #ffffff !important;
+        font-weight: 700;
+        border-bottom: 3px solid #ffffff !important;
+      }
     "))
   ),
 
@@ -353,9 +378,17 @@ ui <- page_navbar(
           numericInput("knn_k", "Neighbors (k)", value = 3, min = 1, max = 20, step = 1)
         ),
         
-        numericInput("n_top_groups", "Score top N groups", value = 10, min = 1),
+        radioButtons("score_scope", "Which groups to score",
+                     choices = c("Top pre-scored groups (recommended)" = "selected",
+                                 "All groups (skip pre-score filter)" = "all"),
+                     selected = "selected"),
+        # "Score top N groups" only limits single-fold + selected scope.
+        conditionalPanel(
+          condition = "!input.run_mccv_mode && input.score_scope == 'selected'",
+          numericInput("n_top_groups", "Score top N groups", value = 10, min = 1)
+        ),
         numericInput("score_seed", "Random seed", value = 42),
-        
+
         tags$hr(),
         checkboxInput("run_mccv_mode", "Run Multi-Fold Parallel MCCV?", value = FALSE),
         
@@ -407,6 +440,7 @@ ui <- page_navbar(
       conditionalPanel(
         condition = "output.score_done && !output.mccv_running",
         uiOutput("time_score"),
+        uiOutput("score_summary"),
 
         # Display Single Fold Mode Results
         conditionalPanel(
@@ -1088,9 +1122,24 @@ server <- function(input, output, session) {
         sprintf("%s needs the R package <b>%s</b>, which isn't installed.<br>Install it in R: <code>install.packages(\"%s\")</code>, then click Run Analysis.",
                 method_lbl, req_pkg, req_pkg)))
     }
+    n_pre <- length(rv$prescore_groups %||% list())
+    scope_txt <- if (identical(input$score_scope, "all")) {
+      sprintf("Will score <b>ALL %d groups</b> (pre-score filter skipped)%s.",
+              rv$dataset$params$n_groups,
+              if (isTRUE(input$run_mccv_mode)) " per fold" else "")
+    } else if (isTRUE(input$run_mccv_mode)) {
+      est <- max(1, ceiling(rv$dataset$params$n_groups * input$top_percent / 100))
+      heavy <- if (est > 100)
+        sprintf(" <span style='color:#f1c232'>⚠️ ~%d groups/fold × %d folds — this can take many minutes and the app is busy during each parallel batch.</span>",
+                est, input$mccv_iterations %||% 0) else ""
+      sprintf("Will score the <b>top %s%%</b> (~%d) pre-scored groups per fold.%s",
+              input$top_percent, est, heavy)
+    } else {
+      sprintf("Will score the <b>top %d</b> of %d pre-scored groups.",
+              min(input$n_top_groups %||% 10, n_pre), n_pre)
+    }
     alert_box("ok", paste0("Ready — ", method_lbl, " · ", mode_lbl),
-              sprintf("Prerequisites met (data loaded, %d groups pre-selected). Click <b>🚀 Run Analysis</b>.",
-                      length(rv$prescore_groups %||% list())))
+              paste0(scope_txt, " Click <b>🚀 Run Analysis</b>."))
   })
 
   observeEvent(input$btn_score, {
@@ -1155,12 +1204,23 @@ server <- function(input, output, session) {
 
       if (!input$run_mccv_mode) {
         # ── SINGLE FOLD SCORING ─────────────────────────────────────────────
-        groups_to_score <- rv$prescore_groups
-        n <- min(input$n_top_groups, length(groups_to_score))
-        groups_to_score <- groups_to_score[seq_len(n)]
+        # Scope: pre-selected top groups (trim to top N) OR all groups.
+        scope_all <- identical(input$score_scope, "all")
+        if (scope_all) {
+          groups_to_score <- rv$dataset$groups          # every group, no top-N cap
+        } else {
+          groups_to_score <- rv$prescore_groups          # pre-scored set...
+          keep <- min(input$n_top_groups, length(groups_to_score))
+          groups_to_score <- groups_to_score[seq_len(keep)]  # ...trimmed to top N
+        }
+        n <- length(groups_to_score)
+        scope_msg <- if (scope_all)
+          sprintf("ALL %d groups", n)
+        else
+          sprintf("top %d of %d pre-scored groups", n, length(rv$prescore_groups))
 
         results <- list()
-        withProgress(message = "Scoring groups...", value = 0, {
+        withProgress(message = paste0("Scoring ", scope_msg, "…"), value = 0, {
           for (i in seq_along(groups_to_score)) {
             gname <- names(groups_to_score)[i]
             setProgress(i / n, detail = paste0(gname, " (", i, "/", n, ")"))
@@ -1203,7 +1263,23 @@ server <- function(input, output, session) {
           rv$scored <- TRUE
           setProgress(1.0, detail = "Done!")
         })
-        
+
+        rv$score_summary <- list(
+          mode = "single",
+          scope = if (scope_all) "All groups (pre-score filter skipped)"
+                  else "Top pre-scored groups",
+          classifier = classifier_label(input$score_method),
+          params = format_params(score_args),
+          n_groups_scored = n,
+          n_groups_available = if (scope_all) rv$dataset$params$n_groups
+                               else length(rv$prescore_groups),
+          n_features = length(final_model$features),
+          prescore_method = if (scope_all) "skipped" else input$prescore_method,
+          prescore_top_percent = input$top_percent,
+          seed = input$score_seed,
+          dataset = sprintf("%d samples x %d genes",
+                            rv$dataset$params$n_samples, rv$dataset$params$n_genes)
+        )
         rv$time_score <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
         showNotification(paste0("\u2705 Scored ", n, " groups and built final model in ",
                                 format_duration(rv$time_score), "!"), type = "message")
@@ -1220,11 +1296,15 @@ server <- function(input, output, session) {
           model_args <- list(k = input$knn_k)
         }
 
+        # Scope: "all" groups => keep 100% in each fold's pre-scoring (no filter).
+        scope_all <- identical(input$score_scope, "all")
+        fold_top_pct <- if (scope_all) 100 else input$top_percent
+        mc$scope_all <- scope_all
         # Hand off to the batched worker so the panel fills live, fold by fold.
         mc$params <- list(
           dataset = rv$dataset, train_ratio = input$mccv_train_ratio,
           pre_score_method = input$prescore_method,
-          pre_score_top_percent = input$top_percent,
+          pre_score_top_percent = fold_top_pct,
           score_method = input$score_method, model_method = m_method,
           score_args = score_args, model_args = model_args,
           seed = input$score_seed
@@ -1234,6 +1314,7 @@ server <- function(input, output, session) {
         mc$done   <- 0
         mc$folds  <- vector("list", mc$n)
         mc$tick   <- 0
+        mc$primed <- FALSE   # first worker tick only paints the live panel
         mc$t0     <- Sys.time()
         mc$active <- TRUE
         showNotification(sprintf("🚀 Starting Parallel MCCV: %d folds on %d core(s)…",
@@ -1248,6 +1329,13 @@ server <- function(input, output, session) {
   # \u2500\u2500 MCCV worker: run `cores` folds per cycle, stream results, then aggregate
   observe({
     req(mc$active)
+    # First tick: do NO heavy work \u2014 just yield so Shiny paints the live
+    # "running" panel before the (blocking) parallel batch starts.
+    if (!isTRUE(isolate(mc$primed))) {
+      isolate(mc$primed <- TRUE)
+      invalidateLater(60)
+      return()
+    }
     err <- tryCatch({ isolate({
       if (mc$done >= mc$n) {
         # \u2500\u2500 Finalize: aggregate exactly like run_mccv() \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -1266,6 +1354,29 @@ server <- function(input, output, session) {
             SD   = apply(metrics_df, 2, stats::sd, na.rm = TRUE)
           ),
           raw_metrics = metrics_df
+        )
+        p <- mc$params
+        groups_per_fold <- vapply(ok, function(r) r$n_groups %||% NA_integer_, integer(1))
+        feats_per_fold  <- vapply(ok, function(r) r$features_count %||% NA_integer_, integer(1))
+        rv$score_summary <- list(
+          mode = "mccv",
+          scope = if (isTRUE(mc$scope_all)) "All groups (pre-score keeps 100%/fold)"
+                  else "Top pre-scored groups",
+          classifier = classifier_label(p$score_method),
+          model_classifier = classifier_label(p$model_method),
+          params = format_params(p$score_args),
+          model_params = format_params(p$model_args),
+          n_iterations = mc$n,
+          n_folds_ok = length(ok),
+          cores = mc$cores,
+          train_ratio = p$train_ratio,
+          prescore_method = p$pre_score_method,
+          prescore_top_percent = p$pre_score_top_percent,
+          groups_per_fold = round(mean(groups_per_fold, na.rm = TRUE), 1),
+          features_per_fold = round(mean(feats_per_fold, na.rm = TRUE), 1),
+          seed = p$seed,
+          dataset = sprintf("%d samples x %d genes",
+                            rv$dataset$params$n_samples, rv$dataset$params$n_genes)
         )
         rv$scored <- TRUE
         rv$time_score <- as.numeric(difftime(Sys.time(), mc$t0, units = "secs"))
@@ -1396,6 +1507,58 @@ server <- function(input, output, session) {
     df$Fold <- as.character(df$Fold)
     df
   }, striped = TRUE, hover = TRUE, width = "100%", digits = 4)
+
+  # Run summary card: what algorithm / parameters / how many groups were used.
+  output$score_summary <- renderUI({
+    req(rv$scored, rv$score_summary)
+    s <- rv$score_summary
+    row <- function(k, v) tags$div(
+      style = "display:flex; justify-content:space-between; gap:1rem; padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.06);",
+      tags$span(class = "text-muted", k), tags$b(style = "text-align:right;", v))
+
+    items <- if (identical(s$mode, "single")) {
+      list(
+        row("Mode", "Single-fold scoring"),
+        row("Groups source", s$scope),
+        row("Scoring algorithm", s$classifier),
+        row("Hyperparameters", s$params),
+        row("Groups scored", sprintf("%d (of %d %s)",
+                                      s$n_groups_scored, s$n_groups_available,
+                                      if (grepl("^All", s$scope)) "total" else "pre-selected")),
+        row("Features in joint model", format(s$n_features, big.mark = ",")),
+        row("Pre-scoring", if (identical(s$prescore_method, "skipped")) "skipped"
+                           else sprintf("%s · top %s%%", toupper(s$prescore_method),
+                                        s$prescore_top_percent)),
+        row("Dataset", s$dataset),
+        row("Random seed", s$seed),
+        row("Runtime", format_duration(rv$time_score))
+      )
+    } else {
+      list(
+        row("Mode", sprintf("Parallel MCCV · %d cores", s$cores)),
+        row("Groups source", s$scope),
+        row("Iterations (folds)", sprintf("%d (%d succeeded)",
+                                          s$n_iterations, s$n_folds_ok)),
+        row("Scoring algorithm", sprintf("%s (%s)", s$classifier, s$params)),
+        row("Final model algorithm", sprintf("%s (%s)", s$model_classifier, s$model_params)),
+        row("Avg groups scored / fold", s$groups_per_fold),
+        row("Avg features / fold", s$features_per_fold),
+        row("Pre-scoring", sprintf("%s · top %s%%", toupper(s$prescore_method),
+                                   s$prescore_top_percent)),
+        row("Train ratio", s$train_ratio),
+        row("Dataset", s$dataset),
+        row("Random seed", s$seed),
+        row("Runtime", format_duration(rv$time_score))
+      )
+    }
+    tags$div(
+      class = "value-box",
+      style = "background: rgba(74,144,217,0.08); border-left: 4px solid #4a90d9;",
+      tags$div(style = "font-size:1.1rem; font-weight:600; margin-bottom:6px;",
+               "\U0001F4CB Run summary"),
+      items
+    )
+  })
 
   output$time_score <- renderUI({
     req(rv$scored, rv$time_score)
