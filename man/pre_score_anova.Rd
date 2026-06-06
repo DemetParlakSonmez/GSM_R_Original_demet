@@ -4,7 +4,7 @@
 \alias{pre_score_anova}
 \title{Pre-score groups using one-way ANOVA}
 \usage{
-pre_score_anova(dataset, train_idx, top_percent = 20, ...)
+pre_score_anova(dataset, train_idx, top_percent = 20, progress = NULL, ...)
 }
 \arguments{
 \item{dataset}{A \code{gsm_dataset} object.}
@@ -13,10 +13,13 @@ pre_score_anova(dataset, train_idx, top_percent = 20, ...)
 
 \item{top_percent}{Percentage of top groups to retain.}
 
+\item{progress}{Optional callback \code{progress(i, n, group_name, score)}.}
+
 \item{...}{Ignored.}
 }
 \value{
-Named list of character vectors (top groups).
+Named list of character vectors (top groups). The full sorted
+per-group scores are attached as \code{attr(., "scores")}.
 }
 \description{
 For each group, computes a summary statistic from one-way ANOVA tests

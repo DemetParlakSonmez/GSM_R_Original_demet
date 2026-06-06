@@ -4,6 +4,63 @@
 #' @name mccv
 NULL
 
+#' Run a single MCCV fold
+#'
+#' Executes one Monte Carlo CV iteration: stratified split, pre-scoring,
+#' per-group scoring, and final joint model. Exported so callers (e.g. the
+#' Shiny app) can run folds incrementally and stream live per-fold results.
+#'
+#' @param dataset A `gsm_dataset` object.
+#' @param fold Integer fold index (also offsets the seed: `seed + fold`).
+#' @param train_ratio,pre_score_method,pre_score_top_percent,score_method,model_method,score_args,model_args,seed
+#'   See [run_mccv()].
+#' @return A list with `fold`, `status` ("success"/"error"), and on success
+#'   `metrics`, `features_count`, and `group_accuracies`.
+#' @export
+mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
+                          pre_score_method = "anova", pre_score_top_percent = 1,
+                          score_method = "rf", model_method = "rf",
+                          score_args = list(), model_args = list(), seed = 42) {
+  fold_seed <- seed + fold
+  tryCatch({
+    split <- split_train_test(dataset$labels, ratio = train_ratio, seed = fold_seed)
+
+    top_groups <- pre_score_groups(dataset, split$train,
+                                   method = pre_score_method,
+                                   top_percent = pre_score_top_percent)
+
+    group_scores <- list()
+    for (name in names(top_groups)) {
+      score_args_combined <- c(
+        list(expr = dataset$expr, labels = dataset$labels,
+             genes = top_groups[[name]], train_idx = split$train,
+             method = score_method),
+        score_args
+      )
+      score <- do.call(score_group, score_args_combined)
+      group_scores[[name]] <- score$accuracy
+    }
+
+    model_args_combined <- c(
+      list(expr = dataset$expr, labels = dataset$labels, top_groups = top_groups,
+           train_idx = split$train, method = model_method),
+      model_args
+    )
+    final_model <- do.call(build_model, model_args_combined)
+
+    list(
+      fold = fold,
+      status = "success",
+      metrics = final_model$metrics,
+      features_count = length(final_model$features),
+      n_groups = length(top_groups),
+      group_accuracies = group_scores
+    )
+  }, error = function(e) {
+    list(fold = fold, status = "error", error_message = conditionMessage(e))
+  })
+}
+
 #' Run Monte Carlo Cross-Validation (MCCV) in parallel
 #'
 #' Runs multiple iterations of stratified train/test splitting, statistical
@@ -41,53 +98,14 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
   
   message(sprintf("Starting MCCV with %d iterations on %d cores...", n_iterations, cores))
 
-  # Define the single fold runner
+  # Single fold runner delegates to the exported helper (shared with the
+  # Shiny app's live/streaming MCCV view).
   run_fold <- function(i) {
-    fold_seed <- seed + i
-    
-    tryCatch({
-      # Run split
-      split <- split_train_test(dataset$labels, ratio = train_ratio, seed = fold_seed)
-      
-      # Pre-scoring
-      top_groups <- pre_score_groups(dataset, split$train, 
-                                     method = pre_score_method, 
-                                     top_percent = pre_score_top_percent)
-      
-      # Score individual groups
-      group_scores <- list()
-      for (name in names(top_groups)) {
-        genes <- top_groups[[name]]
-        
-        score_args_combined <- c(
-          list(expr = dataset$expr, labels = dataset$labels, genes = genes, train_idx = split$train, method = score_method),
-          score_args
-        )
-        score <- do.call(score_group, score_args_combined)
-        group_scores[[name]] <- score$accuracy
-      }
-      
-      # Build final model
-      model_args_combined <- c(
-        list(expr = dataset$expr, labels = dataset$labels, top_groups = top_groups, train_idx = split$train, method = model_method),
-        model_args
-      )
-      final_model <- do.call(build_model, model_args_combined)
-      
-      list(
-        fold = i,
-        status = "success",
-        metrics = final_model$metrics,
-        features_count = length(final_model$features),
-        group_accuracies = group_scores
-      )
-    }, error = function(e) {
-      list(
-        fold = i,
-        status = "error",
-        error_message = e$message
-      )
-    })
+    mccv_run_fold(dataset, i, train_ratio = train_ratio,
+                  pre_score_method = pre_score_method,
+                  pre_score_top_percent = pre_score_top_percent,
+                  score_method = score_method, model_method = model_method,
+                  score_args = score_args, model_args = model_args, seed = seed)
   }
 
   # Run in parallel or sequentially based on cores and OS

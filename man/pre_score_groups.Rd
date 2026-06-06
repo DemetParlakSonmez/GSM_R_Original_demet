@@ -4,7 +4,14 @@
 \alias{pre_score_groups}
 \title{Pre-score groups to select top candidates}
 \usage{
-pre_score_groups(dataset, train_idx, method = "anova", top_percent = 20, ...)
+pre_score_groups(
+  dataset,
+  train_idx,
+  method = "anova",
+  top_percent = 20,
+  progress = NULL,
+  ...
+)
 }
 \arguments{
 \item{dataset}{A \code{gsm_dataset} object.}
@@ -15,11 +22,16 @@ pre_score_groups(dataset, train_idx, method = "anova", top_percent = 20, ...)
 
 \item{top_percent}{Percentage of top groups to retain. Default \code{20}.}
 
+\item{progress}{Optional callback invoked once per group as
+\code{progress(i, n, group_name, score)}. Useful for live UI progress.}
+
 \item{...}{Additional arguments passed to the specific method.}
 }
 \value{
 A named list of character vectors — the subset of groups that
 passed pre-scoring, ordered by significance (most significant first).
+The full per-group scores (all groups, sorted descending) are attached
+as \code{attr(result, "scores")}, and the cutoff count as \code{attr(result, "n_keep")}.
 }
 \description{
 An abstract function that dispatches to a specific pre-scoring method.

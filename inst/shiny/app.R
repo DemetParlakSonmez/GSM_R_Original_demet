@@ -18,6 +18,28 @@ if (requireNamespace("gsmR", quietly = TRUE)) {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Discover example datasets (repo-level example_*_files/ + bundled toy data)
+# ══════════════════════════════════════════════════════════════════════════════
+.launch_dir <- getOption("gsmR.launch_dir", getwd())
+.example_input_dir  <- getOption("gsmR.example_input_dir",
+                                 file.path(.launch_dir, "example_input_files"))
+.example_groups_dir <- getOption("gsmR.example_groups_dir",
+                                 file.path(.launch_dir, "example_grouping_files"))
+
+.list_examples <- function(dir, pattern) {
+  if (!dir.exists(dir)) return(character(0))
+  sort(list.files(dir, pattern = pattern, ignore.case = TRUE))
+}
+.example_inputs <- .list_examples(.example_input_dir,  "\\.(csv|tsv|txt)$")
+.example_groups <- .list_examples(.example_groups_dir, "\\.(csv|tsv|gmt|txt)$")
+
+# Choice lists always include the bundled toy data as the first option.
+.expr_choices   <- c("Bundled toy (test_expression.csv)" = "__toy__",
+                     stats::setNames(.example_inputs, .example_inputs))
+.groups_choices <- c("Bundled toy (test_groups.csv)" = "__toy__",
+                     stats::setNames(.example_groups, .example_groups))
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Helper: value box HTML
 # ══════════════════════════════════════════════════════════════════════════════
 value_box_ui <- function(value, label, icon = NULL) {
@@ -25,6 +47,30 @@ value_box_ui <- function(value, label, icon = NULL) {
     class = "value-box",
     if (!is.null(icon)) tags$span(style = "float:right; font-size:1.5rem; opacity:0.4;", icon),
     tags$div(class = "value", value),
+    tags$div(class = "label", label)
+  )
+}
+
+# Null-coalescing helper (base R only ships %||% from 4.4.0).
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+# Human-readable elapsed time, reported in minutes or hours (seconds for short runs).
+format_duration <- function(secs) {
+  if (is.null(secs) || is.na(secs)) return("—")
+  if (secs < 60)     return(sprintf("%.1f sec", secs))
+  mins <- secs / 60
+  if (mins < 60)     return(sprintf("%.2f min (%.0f sec)", mins, secs))
+  hrs <- mins / 60
+  sprintf("%.2f hours (%.1f min)", hrs, mins)
+}
+
+# Full-width banner reporting how long a step took.
+time_banner_ui <- function(secs, label = "Completed in") {
+  tags$div(
+    class = "value-box",
+    style = "background: rgba(74,144,217,0.12); border-left: 4px solid #4a90d9;",
+    tags$div(style = "font-size:1.4rem; font-weight:600;",
+             paste0("⏱️ ", format_duration(secs))),
     tags$div(class = "label", label)
   )
 }
@@ -84,7 +130,17 @@ ui <- page_navbar(
         numericInput("max_group_size", "Max group size", value = 500, min = 10),
         tags$hr(),
         actionButton("btn_load", "\U0001F680 Load & Validate",
-                     class = "btn-primary btn-lg w-100")
+                     class = "btn-primary btn-lg w-100"),
+        tags$div(class = "text-center text-muted my-2",
+                 style = "font-size:0.8rem;", "— or pick an example —"),
+        selectInput("example_expr", "Example expression dataset",
+                    choices = .expr_choices),
+        selectInput("example_groups", "Example grouping file",
+                    choices = .groups_choices),
+        actionButton("btn_example", "\U0001F4E6 Load Selected Example",
+                     class = "btn-outline-light btn-sm w-100"),
+        tags$small(class = "text-muted d-block mt-1 text-center",
+                   "Large GDS files may take a few seconds to load")
       ),
 
       # Main panel
@@ -150,6 +206,7 @@ ui <- page_navbar(
       ),
       conditionalPanel(
         condition = "output.collapse_done",
+        uiOutput("time_collapse"),
         layout_columns(
           col_widths = c(4, 4, 4),
           uiOutput("vbox_collapsed_before"),
@@ -191,24 +248,65 @@ ui <- page_navbar(
                     min = 0.5, max = 0.9, value = 0.7, step = 0.05),
         numericInput("prescore_seed", "Random seed", value = 42),
         tags$hr(),
+        checkboxInput("prescore_detail",
+                      "Show detailed info (per-group scores + charts)",
+                      value = TRUE),
+        conditionalPanel(
+          condition = "input.prescore_detail",
+          numericInput("prescore_topn_plot",
+                       "Groups to show in bar chart", value = 20, min = 5, max = 100)
+        ),
+        tags$hr(),
         actionButton("btn_prescore", "\U0001F4CA Run Pre-Scoring",
                      class = "btn-primary btn-lg w-100")
       ),
+      # ── Live view while pre-scoring is running ─────────────────────────
       conditionalPanel(
-        condition = "output.prescore_done",
+        condition = "output.prescore_running",
+        uiOutput("prescore_live_status"),
+        layout_columns(
+          col_widths = c(7, 5),
+          card(
+            card_header("Live: top groups so far"),
+            plotOutput("plot_prescore_live", height = "340px")
+          ),
+          card(
+            card_header("Live leaderboard (top 15 so far)"),
+            tableOutput("prescore_live_table")
+          )
+        )
+      ),
+      conditionalPanel(
+        condition = "output.prescore_done && !output.prescore_running",
+        uiOutput("time_prescore"),
         layout_columns(
           col_widths = c(4, 4, 4),
           uiOutput("vbox_prescore_input"),
           uiOutput("vbox_prescore_output"),
           uiOutput("vbox_prescore_pct")
         ),
+        # Detailed charts (only when the user opts in and ANOVA produced scores)
+        conditionalPanel(
+          condition = "input.prescore_detail && output.prescore_has_scores",
+          layout_columns(
+            col_widths = c(7, 5),
+            card(
+              card_header("Top Groups by Pre-Score (Fisher statistic)"),
+              plotOutput("plot_prescore_bars", height = "320px")
+            ),
+            card(
+              card_header("Score Distribution (all groups)"),
+              plotOutput("plot_prescore_hist", height = "320px")
+            )
+          )
+        ),
         card(
-          card_header("Top-Ranked Groups After Pre-Scoring"),
+          card_header(textOutput("prescore_table_header", inline = TRUE)),
           DTOutput("prescore_table")
         )
       ),
       conditionalPanel(
-        condition = "!output.prescore_done",
+        condition = "!output.prescore_done && !output.prescore_running",
         tags$div(
           style = "text-align:center; padding:80px 20px; opacity:0.5;",
           tags$h3("\U0001F4CA Pre-score groups"),
@@ -278,15 +376,38 @@ ui <- page_navbar(
         
         tags$hr(),
         actionButton("btn_score", "\U0001F680 Run Analysis",
-                     class = "btn-primary btn-lg w-100"),
-        tags$hr(),
-        uiOutput("tab4_dependencies")
+                     class = "btn-primary btn-lg w-100")
       ),
-      
+
+      # ── Always-visible status alert (readiness / what's happening) ──────
+      uiOutput("score_status_alert"),
+
+      # ── Live view while Parallel MCCV is running ───────────────────────
+      conditionalPanel(
+        condition = "output.mccv_running",
+        uiOutput("mccv_live_status"),
+        layout_columns(
+          col_widths = c(6, 6),
+          card(
+            card_header("Live: fold accuracy as folds complete"),
+            plotOutput("plot_mccv_live", height = "340px")
+          ),
+          card(
+            card_header("Live: running metric averages"),
+            uiOutput("mccv_live_means")
+          )
+        ),
+        card(
+          card_header("Live: completed folds"),
+          tableOutput("mccv_live_table")
+        )
+      ),
+
       # Main Panel Results Conditional Displays
       conditionalPanel(
-        condition = "output.score_done",
-        
+        condition = "output.score_done && !output.mccv_running",
+        uiOutput("time_score"),
+
         # Display Single Fold Mode Results
         conditionalPanel(
           condition = "!input.run_mccv_mode",
@@ -344,7 +465,7 @@ ui <- page_navbar(
       ),
       
       conditionalPanel(
-        condition = "!output.score_done",
+        condition = "!output.score_done && !output.mccv_running",
         tags$div(
           style = "text-align:center; padding:80px 20px; opacity:0.5;",
           tags$h3("\U0001F3AF Run scoring or parallel MCCV analysis"),
@@ -391,38 +512,54 @@ server <- function(input, output, session) {
     scored        = FALSE
   )
 
+  # Chunked pre-scoring worker state (drives the live main-panel view).
+  ps <- reactiveValues(
+    active = FALSE, i = 0, n = 0, tick = 0,
+    gnames = NULL, scores = NULL, groups = NULL,
+    expr = NULL, labels = NULL,
+    current = "", top_percent = 20, t0 = NULL
+  )
+
+  # Batched MCCV worker state (runs `cores` folds per cycle, streams results).
+  mc <- reactiveValues(
+    active = FALSE, done = 0, n = 0, tick = 0,
+    cores = 1, folds = NULL, params = NULL, t0 = NULL
+  )
+
   # ── Output flags for conditionalPanel ──────────────────────────────────
-  output$data_loaded   <- reactive(rv$loaded)
-  output$collapse_done <- reactive(rv$collapsed)
-  output$prescore_done <- reactive(rv$prescored)
-  output$score_done    <- reactive(rv$scored)
-  outputOptions(output, "data_loaded",   suspendWhenHidden = FALSE)
-  outputOptions(output, "collapse_done", suspendWhenHidden = FALSE)
-  outputOptions(output, "prescore_done", suspendWhenHidden = FALSE)
-  outputOptions(output, "score_done",    suspendWhenHidden = FALSE)
+  output$data_loaded     <- reactive(rv$loaded)
+  output$collapse_done   <- reactive(rv$collapsed)
+  output$prescore_done   <- reactive(rv$prescored)
+  output$prescore_running <- reactive(isTRUE(ps$active))
+  output$score_done      <- reactive(rv$scored)
+  output$mccv_running    <- reactive(isTRUE(mc$active))
+  outputOptions(output, "data_loaded",      suspendWhenHidden = FALSE)
+  outputOptions(output, "collapse_done",    suspendWhenHidden = FALSE)
+  outputOptions(output, "prescore_done",    suspendWhenHidden = FALSE)
+  outputOptions(output, "prescore_running", suspendWhenHidden = FALSE)
+  outputOptions(output, "score_done",       suspendWhenHidden = FALSE)
+  outputOptions(output, "mccv_running",     suspendWhenHidden = FALSE)
 
   # ══════════════════════════════════════════════════════════════════════
   # Tab 1: Load Data
   # ══════════════════════════════════════════════════════════════════════
-  observeEvent(input$btn_load, {
-    req(input$expr_file, input$groups_file)
-
+  # Shared loader used by both the file upload and the example dataset buttons.
+  load_into_rv <- function(expr_path, groups_path, groups_name, fmt) {
     tryCatch({
       withProgress(message = "Loading data...", value = 0.3, {
         # Read expression
-        expr_data <- read_expression(input$expr_file$datapath)
+        expr_data <- read_expression(expr_path)
         setProgress(0.5, detail = "Reading groups...")
 
-        # Read groups
-        fmt <- input$groups_format
+        # Read groups (resolve auto-detect from the file extension)
         if (fmt == "auto") {
-          ext <- tolower(tools::file_ext(input$groups_file$name))
+          ext <- tolower(tools::file_ext(groups_name))
           fmt <- if (ext == "gmt") "gmt" else "csv"
         }
         groups <- if (fmt == "gmt") {
-          read_gmt(input$groups_file$datapath)
+          read_gmt(groups_path)
         } else {
-          read_groups(input$groups_file$datapath)
+          read_groups(groups_path)
         }
 
         setProgress(0.8, detail = "Building dataset...")
@@ -452,6 +589,39 @@ server <- function(input, output, session) {
       showNotification(paste("\u274C Error:", e$message), type = "error",
                        duration = 10)
     })
+  }
+
+  observeEvent(input$btn_load, {
+    req(input$expr_file, input$groups_file)
+    load_into_rv(input$expr_file$datapath, input$groups_file$datapath,
+                 input$groups_file$name, input$groups_format)
+  })
+
+  # Load a selected example: either the bundled toy data (inst/extdata) or one
+  # of the repo-level example_input_files/ + example_grouping_files/ datasets.
+  observeEvent(input$btn_example, {
+    expr_sel <- input$example_expr
+    grp_sel  <- input$example_groups
+
+    expr_path <- if (expr_sel == "__toy__") {
+      system.file("extdata", "test_expression.csv", package = "gsmR")
+    } else file.path(.example_input_dir, expr_sel)
+
+    grp_name <- if (grp_sel == "__toy__") "test_groups.csv" else grp_sel
+    grp_path <- if (grp_sel == "__toy__") {
+      system.file("extdata", "test_groups.csv", package = "gsmR")
+    } else file.path(.example_groups_dir, grp_sel)
+
+    if (!nzchar(expr_path) || !file.exists(expr_path)) {
+      showNotification(paste("\u274C Expression file not found:", expr_sel),
+                       type = "error", duration = 10); return()
+    }
+    if (!nzchar(grp_path) || !file.exists(grp_path)) {
+      showNotification(paste("\u274C Grouping file not found:", grp_sel),
+                       type = "error", duration = 10); return()
+    }
+    # Respect the format dropdown; "auto" resolves from the file extension.
+    load_into_rv(expr_path, grp_path, grp_name, input$groups_format)
   })
 
   # Value boxes
@@ -476,8 +646,8 @@ server <- function(input, output, session) {
   output$plot_class_dist <- renderPlot({
     req(rv$dataset)
     tbl <- table(rv$dataset$labels)
-    par(bg = "transparent", col.axis = "#aaa", col.lab = "#aaa",
-        col.main = "#ccc", fg = "#555", mar = c(4, 4, 2, 1))
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        col.main = "#cccccc", fg = "#555555", mar = c(4, 4, 2, 1))
     bp <- barplot(tbl, col = c("#4a90d9", "#e06666", "#6aa84f", "#f1c232")[
       seq_along(tbl)
     ], border = NA, main = "", ylab = "Count", las = 1)
@@ -487,13 +657,13 @@ server <- function(input, output, session) {
   output$plot_group_sizes <- renderPlot({
     req(rv$dataset)
     sizes <- vapply(rv$dataset$groups, length, integer(1))
-    par(bg = "transparent", col.axis = "#aaa", col.lab = "#aaa",
-        col.main = "#ccc", fg = "#555", mar = c(4, 4, 2, 1))
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        col.main = "#cccccc", fg = "#555555", mar = c(4, 4, 2, 1))
     hist(sizes, breaks = 30, col = "#4a90d9", border = NA,
          main = "", xlab = "Genes per group", ylab = "Frequency", las = 1)
     abline(v = median(sizes), col = "#f1c232", lwd = 2, lty = 2)
     legend("topright", legend = paste("Median:", median(sizes)),
-           col = "#f1c232", lwd = 2, lty = 2, bty = "n", text.col = "#aaa")
+           col = "#f1c232", lwd = 2, lty = 2, bty = "n", text.col = "#aaaaaa")
   }, bg = "transparent")
 
   # Expression preview
@@ -518,6 +688,7 @@ server <- function(input, output, session) {
     req(rv$loaded, input$meta_file)
 
     tryCatch({
+      t0 <- Sys.time()
       withProgress(message = "Collapsing replicates...", value = 0.3, {
         # Read metadata
         meta <- data.table::fread(input$meta_file$datapath, header = TRUE,
@@ -540,11 +711,19 @@ server <- function(input, output, session) {
         rv$collapsed <- TRUE
         setProgress(1, detail = "Done!")
       })
-      showNotification("\u2705 Replicates collapsed!", type = "message")
+      rv$time_collapse <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+      showNotification(paste0("\u2705 Replicates collapsed in ",
+                              format_duration(rv$time_collapse), "!"),
+                       type = "message")
     }, error = function(e) {
       showNotification(paste("\u274C Error:", e$message), type = "error",
                        duration = 10)
     })
+  })
+
+  output$time_collapse <- renderUI({
+    req(rv$collapsed, rv$time_collapse)
+    time_banner_ui(rv$time_collapse, "Replicate collapse runtime")
   })
 
   output$vbox_collapsed_before <- renderUI({
@@ -576,41 +755,180 @@ server <- function(input, output, session) {
   # ══════════════════════════════════════════════════════════════════════
   # Tab 3: Pre-Scoring
   # ══════════════════════════════════════════════════════════════════════
+  # How many groups to score per reactive cycle. Larger = faster overall but
+  # less frequent repaints; smaller = smoother live updates.
+  PRESCORE_CHUNK <- 25
+
   observeEvent(input$btn_prescore, {
     req(rv$loaded)
+    if (isTRUE(ps$active)) return()  # ignore re-clicks while running
 
     tryCatch({
-      withProgress(message = "Pre-scoring groups...", value = 0.2, {
-        ds <- rv$dataset
+      ds <- rv$dataset
+      split <- split_train_test(ds$labels,
+                                ratio = input$train_ratio,
+                                seed = input$prescore_seed)
+      rv$train_idx <- split$train
+      rv$prescored <- FALSE   # hide old results; the live panel takes over
+      rv$scored <- FALSE
 
-        # Train/test split
-        split <- split_train_test(ds$labels,
-                                  ratio = input$train_ratio,
-                                  seed = input$prescore_seed)
-        rv$train_idx <- split$train
-
-        setProgress(0.4, detail = paste0("Scoring ", ds$params$n_groups, " groups..."))
-
-        top_groups <- pre_score_groups(
-          ds,
-          train_idx   = split$train,
-          method      = input$prescore_method,
-          top_percent = input$top_percent
-        )
-
+      # "None" method is instant \u2014 no need for the live chunked worker.
+      if (input$prescore_method != "anova") {
+        t0 <- Sys.time()
+        top_groups <- pre_score_groups(ds, train_idx = split$train,
+                                       method = input$prescore_method,
+                                       top_percent = input$top_percent)
         rv$prescore_groups <- top_groups
+        rv$prescore_scores <- attr(top_groups, "scores")
+        rv$prescore_nkeep  <- attr(top_groups, "n_keep")
         rv$prescored <- TRUE
-        rv$scored <- FALSE  # Reset downstream
+        rv$time_prescore <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+        showNotification(paste0("\u2705 Pre-scoring done in ",
+                                format_duration(rv$time_prescore), "! ",
+                                length(top_groups), " groups selected."),
+                         type = "message")
+        return()
+      }
 
-        setProgress(1, detail = "Done!")
-      })
-      showNotification(paste0("\u2705 Pre-scoring done! ",
-                              length(rv$prescore_groups), " groups selected."),
-                       type = "message")
+      # ANOVA: set up the chunked worker so the main panel can fill live.
+      ps$expr        <- ds$expr[, split$train, drop = FALSE]
+      ps$labels      <- ds$labels[split$train]
+      ps$groups      <- ds$groups
+      ps$gnames      <- names(ds$groups)
+      ps$n           <- length(ps$gnames)
+      ps$scores      <- stats::setNames(rep(NA_real_, ps$n), ps$gnames)
+      ps$i           <- 0
+      ps$current     <- ""
+      ps$top_percent <- input$top_percent
+      ps$t0          <- Sys.time()
+      ps$active      <- TRUE
     }, error = function(e) {
+      ps$active <- FALSE
       showNotification(paste("\u274C Error:", e$message), type = "error",
                        duration = 10)
     })
+  })
+
+  # Worker: scores PRESCORE_CHUNK groups per cycle, yielding between chunks so
+  # Shiny can repaint the live leaderboard/chart. Finalizes when all are done.
+  observe({
+    req(ps$active)
+    err <- tryCatch({ isolate({
+      if (ps$i >= ps$n) {
+        # \u2500\u2500 Finalize \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        sorted <- sort(ps$scores, decreasing = TRUE)
+        n_keep <- max(1, ceiling(ps$n * ps$top_percent / 100))
+        top_names <- names(sorted)[seq_len(n_keep)]
+        res <- ps$groups[top_names]
+        attr(res, "scores") <- sorted
+        attr(res, "n_keep") <- n_keep
+
+        rv$prescore_groups <- res
+        rv$prescore_scores <- sorted
+        rv$prescore_nkeep  <- n_keep
+        rv$prescored <- TRUE
+        rv$scored <- FALSE
+        rv$time_prescore <- as.numeric(difftime(Sys.time(), ps$t0, units = "secs"))
+        ps$active <- FALSE
+        showNotification(paste0("\u2705 Pre-scoring done in ",
+                                format_duration(rv$time_prescore), "! ",
+                                n_keep, " groups selected."),
+                         type = "message")
+        return()
+      }
+
+      # \u2500\u2500 Process one chunk \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+      chunk <- min(PRESCORE_CHUNK, ps$n - ps$i)
+      sc <- ps$scores
+      for (k in seq_len(chunk)) {
+        j <- ps$i + k
+        gene_expr <- ps$expr[ps$groups[[ps$gnames[j]]], , drop = FALSE]
+        pvals <- vapply(seq_len(nrow(gene_expr)), function(r) {
+          tryCatch(stats::oneway.test(gene_expr[r, ] ~ ps$labels)$p.value,
+                   error = function(e) 1.0)
+        }, numeric(1))
+        pvals[pvals == 0] <- .Machine$double.xmin
+        sc[j] <- -2 * sum(log(pvals))
+      }
+      ps$scores  <- sc
+      ps$i       <- ps$i + chunk
+      ps$current <- ps$gnames[ps$i]
+      # Bump the throttled tick ~every 4 chunks so the heavy live chart/table
+      # repaint periodically instead of on every single chunk.
+      if ((ps$i %/% chunk) %% 4 == 0 || ps$i >= ps$n) ps$tick <- ps$tick + 1
+      NULL
+    }) }, error = function(e) conditionMessage(e))
+
+    if (!is.null(err)) {
+      ps$active <- FALSE
+      showNotification(paste("⛔ Pre-scoring stopped:", err), type = "error", duration = 12)
+      return()
+    }
+    if (isTRUE(ps$active)) invalidateLater(20)  # breather so the client repaints
+  })
+
+  # ── Live pre-scoring renderers (active only while ps$active) ────────────
+  output$prescore_live_status <- renderUI({
+    req(ps$active)
+    pct <- if (ps$n > 0) round(100 * ps$i / ps$n) else 0
+    done_scores <- ps$scores[!is.na(ps$scores)]
+    best <- if (length(done_scores)) {
+      b <- which.max(done_scores)
+      sprintf("%s (score = %.1f)", names(done_scores)[b], done_scores[b])
+    } else "—"
+    elapsed <- as.numeric(difftime(Sys.time(), ps$t0, units = "secs"))
+    eta <- if (ps$i > 0) elapsed / ps$i * (ps$n - ps$i) else NA
+    tags$div(
+      class = "value-box",
+      style = "background: rgba(74,144,217,0.12); border-left: 4px solid #4a90d9;",
+      tags$div(style = "display:flex; justify-content:space-between; align-items:baseline;",
+        tags$div(style = "font-size:1.5rem; font-weight:700;",
+                 sprintf("⏳ Scoring groups… %d / %d  (%d%%)", ps$i, ps$n, pct)),
+        tags$div(class = "text-muted",
+                 sprintf("elapsed %s · ETA %s",
+                         format_duration(elapsed), format_duration(eta)))
+      ),
+      # progress bar
+      tags$div(style = "height:10px; background:rgba(255,255,255,0.08); border-radius:6px; margin:10px 0;",
+        tags$div(style = sprintf("height:10px; width:%d%%; background:#4a90d9; border-radius:6px; transition:width .2s;", pct))
+      ),
+      tags$div(class = "label",
+               HTML(sprintf("Now: <b>%s</b> &nbsp;|&nbsp; Best so far: <b>%s</b>",
+                            htmltools::htmlEscape(ps$current), htmltools::htmlEscape(best))))
+    )
+  })
+
+  output$plot_prescore_live <- renderPlot({
+    ps$tick  # throttled dependency
+    req(isolate(ps$active))
+    done <- isolate(ps$scores)[!is.na(isolate(ps$scores))]
+    req(length(done) > 0)
+    topn <- min(input$prescore_topn_plot %||% 20, length(done))
+    s <- rev(sort(done, decreasing = TRUE)[seq_len(topn)])
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        fg = "#555555", mar = c(4, 9, 1, 1))
+    barplot(s, horiz = TRUE, names.arg = names(s), las = 1,
+            col = "#4a90d9", border = NA, cex.names = 0.7,
+            xlab = "Fisher score (computed so far)")
+  }, bg = "transparent")
+
+  output$prescore_live_table <- renderTable({
+    ps$tick  # throttled dependency
+    req(isolate(ps$active))
+    done <- sort(isolate(ps$scores)[!is.na(isolate(ps$scores))], decreasing = TRUE)
+    req(length(done) > 0)
+    done <- utils::head(done, 15)
+    data.frame(
+      Rank  = as.character(seq_along(done)),
+      Group = names(done),
+      Score = round(as.numeric(done), 2),
+      stringsAsFactors = FALSE
+    )
+  }, striped = TRUE, hover = TRUE, width = "100%", digits = 2)
+
+  output$time_prescore <- renderUI({
+    req(rv$prescored, rv$time_prescore)
+    time_banner_ui(rv$time_prescore, "Pre-scoring runtime")
   })
 
   output$vbox_prescore_input <- renderUI({
@@ -627,8 +945,55 @@ server <- function(input, output, session) {
     value_box_ui(paste0(pct, "%"), "Retained", "\U0001F4CA")
   })
 
+  # Flag for the conditionalPanel: do we have numeric scores to chart?
+  output$prescore_has_scores <- reactive({
+    isTRUE(rv$prescored) && !is.null(rv$prescore_scores) &&
+      length(rv$prescore_scores) > 0
+  })
+  outputOptions(output, "prescore_has_scores", suspendWhenHidden = FALSE)
+
+  output$prescore_table_header <- renderText({
+    if (isTRUE(input$prescore_detail) && !is.null(rv$prescore_scores)) {
+      "All Groups Ranked by Pre-Score (selected = kept for scoring)"
+    } else {
+      "Top-Ranked Groups After Pre-Scoring"
+    }
+  })
+
   output$prescore_table <- renderDT({
     req(rv$prescore_groups)
+    detailed <- isTRUE(input$prescore_detail) && !is.null(rv$prescore_scores)
+
+    if (detailed) {
+      scores <- rv$prescore_scores                       # all groups, sorted desc
+      gnames <- names(scores)
+      n_keep <- rv$prescore_nkeep %||% length(rv$prescore_groups)
+      gene_counts <- vapply(gnames, function(g) length(rv$dataset$groups[[g]]),
+                            integer(1))
+      df <- data.frame(
+        Rank     = seq_along(scores),
+        Group    = gnames,
+        Score    = round(as.numeric(scores), 2),
+        Genes    = gene_counts,
+        Selected = ifelse(seq_along(scores) <= n_keep, "✅ yes", "—"),
+        stringsAsFactors = FALSE
+      )
+      dt <- datatable(df, options = list(
+        pageLength = 20, scrollX = TRUE, dom = "ftp",
+        order = list(list(0, "asc"))
+      ), rownames = FALSE, class = "compact stripe") |>
+        formatStyle("Score",
+                    background = styleColorBar(range(df$Score), "#4a90d9"),
+                    backgroundSize = "90% 70%",
+                    backgroundRepeat = "no-repeat",
+                    backgroundPosition = "center") |>
+        formatStyle("Selected",
+                    target = "row",
+                    backgroundColor = styleEqual("—", "rgba(255,255,255,0.02)"))
+      return(dt)
+    }
+
+    # Simple view (detail off, or method = none)
     df <- data.frame(
       Rank  = seq_along(rv$prescore_groups),
       Group = names(rv$prescore_groups),
@@ -640,24 +1005,114 @@ server <- function(input, output, session) {
     ), rownames = FALSE, class = "compact stripe")
   })
 
+  # Bar chart: top-N groups by Fisher score, selected vs not.
+  output$plot_prescore_bars <- renderPlot({
+    req(rv$prescore_scores)
+    scores <- rv$prescore_scores
+    n_keep <- rv$prescore_nkeep %||% length(rv$prescore_groups)
+    topn <- min(input$prescore_topn_plot %||% 20, length(scores))
+    s <- rev(scores[seq_len(topn)])                       # rev: highest at top
+    is_sel <- rev(seq_len(topn) <= n_keep)
+    cols <- ifelse(is_sel, "#4a90d9", "#555555")
+
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        fg = "#555555", mar = c(4, 9, 1, 1))
+    bp <- barplot(s, horiz = TRUE, names.arg = names(s), las = 1,
+                  col = cols, border = NA, cex.names = 0.7,
+                  xlab = "Fisher score  (-2 * sum log p)")
+    legend("bottomright", legend = c("selected", "filtered out"),
+           fill = c("#4a90d9", "#555555"), border = NA, bty = "n",
+           text.col = "#aaaaaa")
+  }, bg = "transparent")
+
+  # Histogram: distribution of all group scores with the selection cutoff.
+  output$plot_prescore_hist <- renderPlot({
+    req(rv$prescore_scores)
+    scores <- as.numeric(rv$prescore_scores)
+    n_keep <- rv$prescore_nkeep %||% length(rv$prescore_groups)
+    cutoff <- scores[min(n_keep, length(scores))]         # score of last kept group
+
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        fg = "#555555", mar = c(4, 4, 1, 1))
+    hist(scores, breaks = min(40, max(10, length(scores) %/% 5)),
+         col = "#4a90d9", border = NA, main = "",
+         xlab = "Fisher score", ylab = "Number of groups", las = 1)
+    abline(v = cutoff, col = "#f1c232", lwd = 2, lty = 2)
+    legend("topright", legend = sprintf("cutoff = %.1f (top %d)", cutoff, n_keep),
+           col = "#f1c232", lwd = 2, lty = 2, bty = "n", text.col = "#aaaaaa")
+  }, bg = "transparent")
+
   # ══════════════════════════════════════════════════════════════════════
   # Tab 4: Scoring
   # ══════════════════════════════════════════════════════════════════════
   
   # Dynamic package requirements notice in sidebar
-  output$tab4_dependencies <- renderUI({
-    req_pkg <- if (input$score_method == "rf") {
-      "randomForest"
-    } else if (input$score_method == "svm") {
-      "e1071"
-    } else {
-      "class (core)"
+  # Prominent, color-coded readiness alert shown at the top of the Score panel.
+  alert_box <- function(type, title, body = NULL) {
+    pal <- switch(type,
+      ok    = list(bg = "rgba(106,168,79,0.15)",  bd = "#6aa84f", ic = "✅"),
+      warn  = list(bg = "rgba(241,194,50,0.15)",  bd = "#f1c232", ic = "⚠️"),
+      error = list(bg = "rgba(224,102,102,0.18)", bd = "#e06666", ic = "⛔"),
+      info  = list(bg = "rgba(74,144,217,0.15)",  bd = "#4a90d9", ic = "ℹ️"))
+    tags$div(
+      class = "value-box",
+      style = sprintf("background:%s; border-left:5px solid %s;", pal$bg, pal$bd),
+      tags$div(style = "font-size:1.15rem; font-weight:600;",
+               paste0(pal$ic, " ", title)),
+      if (!is.null(body)) tags$div(class = "label", style = "margin-top:4px;", HTML(body))
+    )
+  }
+
+  output$score_status_alert <- renderUI({
+    method_lbl <- switch(input$score_method,
+                         rf = "Random Forest", svm = "Support Vector Machine",
+                         knn = "K-Nearest Neighbors", input$score_method)
+    req_pkg <- switch(input$score_method, rf = "randomForest", svm = "e1071", knn = "class")
+    mode_lbl <- if (isTRUE(input$run_mccv_mode))
+      sprintf("Parallel MCCV (%d folds)", input$mccv_iterations %||% 0) else "Single-fold scoring"
+
+    if (isTRUE(mc$active)) {
+      return(alert_box("info", "Analysis running…",
+                       "Parallel MCCV is in progress — see the live panel below."))
     }
-    tags$small(class = "text-muted", paste("Requires package:", req_pkg))
+    if (!isTRUE(rv$loaded)) {
+      return(alert_box("warn", "Step 1 — Load a dataset",
+                       "Go to the <b>📂 Data</b> tab and load (or pick) an expression + grouping file."))
+    }
+    if (!isTRUE(rv$prescored) || is.null(rv$train_idx)) {
+      return(alert_box("warn", "Step 2 — Run Pre-Score first",
+        "Scoring needs the selected groups and train/test split. Go to <b>📊 Pre-Score</b> and click <b>Run Pre-Scoring</b>, then return here."))
+    }
+    if (!requireNamespace(req_pkg, quietly = TRUE)) {
+      return(alert_box("error", paste0("Missing package: ", req_pkg),
+        sprintf("%s needs the R package <b>%s</b>, which isn't installed.<br>Install it in R: <code>install.packages(\"%s\")</code>, then click Run Analysis.",
+                method_lbl, req_pkg, req_pkg)))
+    }
+    alert_box("ok", paste0("Ready — ", method_lbl, " · ", mode_lbl),
+              sprintf("Prerequisites met (data loaded, %d groups pre-selected). Click <b>🚀 Run Analysis</b>.",
+                      length(rv$prescore_groups %||% list())))
   })
 
   observeEvent(input$btn_score, {
-    req(rv$prescored, rv$train_idx)
+    if (isTRUE(mc$active)) {
+      showNotification("⏳ Parallel MCCV is already running — please wait for it to finish.",
+                       type = "warning", duration = 6)
+      return()
+    }
+    # Guard: scoring needs a pre-scoring run first (it provides the selected
+    # groups + the train/test split). Tell the user instead of failing silently.
+    if (!isTRUE(rv$loaded)) {
+      showNotification("⚠️ Load a dataset on the Data tab first.",
+                       type = "warning", duration = 8)
+      return()
+    }
+    if (!isTRUE(rv$prescored) || is.null(rv$train_idx)) {
+      showNotification(paste0("⚠️ Run Pre-Score first — go to the ",
+                              "\U0001F4CA Pre-Score tab and click 'Run Pre-Scoring', ",
+                              "then come back and Run Analysis."),
+                       type = "warning", duration = 10)
+      return()
+    }
 
     # 1. Package dependency validation
     methods_to_check <- unique(c(input$score_method, 
@@ -691,6 +1146,7 @@ server <- function(input, output, session) {
     }
 
     tryCatch({
+      t0 <- Sys.time()
       # Reset previous state
       rv$score_results <- NULL
       rv$final_model <- NULL
@@ -748,7 +1204,9 @@ server <- function(input, output, session) {
           setProgress(1.0, detail = "Done!")
         })
         
-        showNotification(paste0("\u2705 Scored ", n, " groups and built final model!"), type = "message")
+        rv$time_score <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+        showNotification(paste0("\u2705 Scored ", n, " groups and built final model in ",
+                                format_duration(rv$time_score), "!"), type = "message")
       } else {
         # ── PARALLEL MULTI-FOLD MCCV ────────────────────────────────────────
         m_method <- if (input$model_method == "same") input$score_method else input$model_method
@@ -762,37 +1220,187 @@ server <- function(input, output, session) {
           model_args <- list(k = input$knn_k)
         }
 
-        withProgress(message = "Executing Parallel MCCV...", value = 0.1, {
-          setProgress(0.3, detail = sprintf("Running %d iterations across %d cores...", 
-                                             input$mccv_iterations, input$mccv_cores))
-          
-          mccv_res <- run_mccv(
-            dataset               = rv$dataset,
-            n_iterations          = input$mccv_iterations,
-            train_ratio           = input$mccv_train_ratio,
-            pre_score_method      = input$prescore_method,
-            pre_score_top_percent = input$top_percent,
-            score_method          = input$score_method,
-            model_method          = m_method,
-            score_args            = score_args,
-            model_args            = model_args,
-            cores                 = input$mccv_cores,
-            seed                  = input$score_seed
-          )
-          
-          rv$mccv_results <- mccv_res
-          rv$scored <- TRUE
-          setProgress(1.0, detail = "Done!")
-        })
-        
-        showNotification(sprintf("\u2705 Parallel MCCV finished %d iterations successfully!", 
-                                 sum(vapply(mccv_res$folds, \(x) x$status == "success", logical(1)))), 
-                         type = "message")
+        # Hand off to the batched worker so the panel fills live, fold by fold.
+        mc$params <- list(
+          dataset = rv$dataset, train_ratio = input$mccv_train_ratio,
+          pre_score_method = input$prescore_method,
+          pre_score_top_percent = input$top_percent,
+          score_method = input$score_method, model_method = m_method,
+          score_args = score_args, model_args = model_args,
+          seed = input$score_seed
+        )
+        mc$n      <- input$mccv_iterations
+        mc$cores  <- input$mccv_cores
+        mc$done   <- 0
+        mc$folds  <- vector("list", mc$n)
+        mc$tick   <- 0
+        mc$t0     <- Sys.time()
+        mc$active <- TRUE
+        showNotification(sprintf("🚀 Starting Parallel MCCV: %d folds on %d core(s)…",
+                                 mc$n, mc$cores), type = "message", duration = 5)
       }
     }, error = function(e) {
       showNotification(paste("\u274C Error during execution:", e$message), type = "error",
                        duration = 10)
     })
+  })
+
+  # \u2500\u2500 MCCV worker: run `cores` folds per cycle, stream results, then aggregate
+  observe({
+    req(mc$active)
+    err <- tryCatch({ isolate({
+      if (mc$done >= mc$n) {
+        # \u2500\u2500 Finalize: aggregate exactly like run_mccv() \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        results <- mc$folds
+        ok <- Filter(function(r) !is.null(r) && r$status == "success", results)
+        if (length(ok) == 0) {
+          mc$active <- FALSE
+          showNotification("\u274C All MCCV folds failed.", type = "error", duration = 10)
+          return()
+        }
+        metrics_df <- do.call(rbind, lapply(ok, function(r) as.data.frame(r$metrics)))
+        rv$mccv_results <- list(
+          folds = results,
+          metrics_summary = data.frame(
+            Mean = colMeans(metrics_df, na.rm = TRUE),
+            SD   = apply(metrics_df, 2, stats::sd, na.rm = TRUE)
+          ),
+          raw_metrics = metrics_df
+        )
+        rv$scored <- TRUE
+        rv$time_score <- as.numeric(difftime(Sys.time(), mc$t0, units = "secs"))
+        mc$active <- FALSE
+        showNotification(sprintf("\u2705 Parallel MCCV finished %d/%d folds in %s!",
+                                 length(ok), mc$n, format_duration(rv$time_score)),
+                         type = "message")
+        return()
+      }
+
+      # \u2500\u2500 Run the next batch of `cores` folds in parallel \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+      batch <- min(mc$cores, mc$n - mc$done)
+      idx <- mc$done + seq_len(batch)
+      p <- mc$params
+      runner <- function(i) mccv_run_fold(
+        p$dataset, i, train_ratio = p$train_ratio,
+        pre_score_method = p$pre_score_method,
+        pre_score_top_percent = p$pre_score_top_percent,
+        score_method = p$score_method, model_method = p$model_method,
+        score_args = p$score_args, model_args = p$model_args, seed = p$seed)
+      res <- if (mc$cores > 1 && .Platform$OS.type != "windows") {
+        parallel::mclapply(idx, runner, mc.cores = mc$cores)
+      } else {
+        lapply(idx, runner)
+      }
+      for (k in seq_along(idx)) mc$folds[[idx[k]]] <- res[[k]]
+      mc$done <- mc$done + batch
+      mc$tick <- mc$tick + 1
+      NULL
+    }) }, error = function(e) conditionMessage(e))
+
+    # On any unexpected error, stop cleanly so the button isn't dead-locked.
+    if (!is.null(err)) {
+      mc$active <- FALSE
+      showNotification(paste("⛔ MCCV stopped:", err), type = "error", duration = 12)
+      return()
+    }
+    if (isTRUE(mc$active)) invalidateLater(20)
+  })
+
+  # Helper: accuracy vector from completed folds (in fold order).
+  mccv_done_folds <- function() {
+    Filter(function(r) !is.null(r) && r$status == "success", mc$folds)
+  }
+
+  output$mccv_live_status <- renderUI({
+    req(mc$active)
+    pct <- if (mc$n > 0) round(100 * mc$done / mc$n) else 0
+    elapsed <- as.numeric(difftime(Sys.time(), mc$t0, units = "secs"))
+    eta <- if (mc$done > 0) elapsed / mc$done * (mc$n - mc$done) else NA
+    ok <- mccv_done_folds()
+    accs <- vapply(ok, function(r) as.numeric(r$metrics$Accuracy), numeric(1))
+    best <- if (length(accs)) sprintf("%.1f%%", 100 * max(accs)) else "\u2014"
+    meanacc <- if (length(accs)) sprintf("%.1f%%", 100 * mean(accs)) else "\u2014"
+    tags$div(
+      class = "value-box",
+      style = "background: rgba(74,144,217,0.12); border-left: 4px solid #4a90d9;",
+      tags$div(style = "display:flex; justify-content:space-between; align-items:baseline;",
+        tags$div(style = "font-size:1.5rem; font-weight:700;",
+                 sprintf("\u23F3 Running MCCV fold %d / %d  (%d%%)", mc$done, mc$n, pct)),
+        tags$div(class = "text-muted",
+                 sprintf("%d cores \u00B7 elapsed %s \u00B7 ETA %s",
+                         mc$cores, format_duration(elapsed), format_duration(eta)))
+      ),
+      tags$div(style = "height:10px; background:rgba(255,255,255,0.08); border-radius:6px; margin:10px 0;",
+        tags$div(style = sprintf("height:10px; width:%d%%; background:#4a90d9; border-radius:6px; transition:width .2s;", pct))
+      ),
+      tags$div(class = "label",
+               HTML(sprintf("Folds done: <b>%d</b> &nbsp;|&nbsp; Mean accuracy: <b>%s</b> &nbsp;|&nbsp; Best: <b>%s</b>",
+                            length(ok), meanacc, best)))
+    )
+  })
+
+  output$plot_mccv_live <- renderPlot({
+    mc$tick
+    req(isolate(mc$active))
+    ok <- isolate(mccv_done_folds())
+    req(length(ok) > 0)
+    accs <- vapply(ok, function(r) as.numeric(r$metrics$Accuracy), numeric(1))
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        fg = "#555555", mar = c(4, 4, 2, 1))
+    if (length(accs) >= 3) {
+      boxplot(accs, horizontal = TRUE, col = "#4a90d9", border = "#cccccc",
+              ylim = c(0, 1), main = "", xlab = "Fold accuracy")
+      points(accs, rep(1, length(accs)), pch = 19,
+             col = grDevices::adjustcolor("#f1c232", 0.7))
+    } else {
+      barplot(accs, names.arg = paste0("F", seq_along(accs)), col = "#4a90d9",
+              border = NA, ylim = c(0, 1), ylab = "Accuracy")
+    }
+  }, bg = "transparent")
+
+  output$mccv_live_means <- renderUI({
+    mc$tick
+    req(isolate(mc$active))
+    ok <- isolate(mccv_done_folds())
+    if (length(ok) == 0) return(tags$p(class = "text-muted", "Waiting for first fold\u2026"))
+    md <- do.call(rbind, lapply(ok, function(r) as.data.frame(r$metrics)))
+    means <- colMeans(md, na.rm = TRUE)
+    tagList(lapply(names(means), function(nm) {
+      tags$div(style = "display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.05);",
+        tags$span(class = "text-muted", gsub("_", " ", nm)),
+        tags$b(sprintf("%.3f", means[[nm]])))
+    }))
+  })
+
+  output$mccv_live_table <- renderTable({
+    mc$tick
+    req(isolate(mc$active))
+    rows <- Filter(Negate(is.null), isolate(mc$folds))
+    req(length(rows) > 0)
+    df <- do.call(rbind, lapply(rows, function(r) {
+      if (r$status == "success") {
+        data.frame(Fold = r$fold, Status = "OK",
+                   Accuracy = round(as.numeric(r$metrics$Accuracy), 4),
+                   Kappa = round(as.numeric(r$metrics$Cohens_kappa), 4),
+                   Sensitivity = round(as.numeric(r$metrics$Sensitivity), 4),
+                   Features = as.character(r$features_count %||% NA),
+                   Groups = as.character(r$n_groups %||% NA),
+                   stringsAsFactors = FALSE)
+      } else {
+        data.frame(Fold = r$fold, Status = "FAIL", Accuracy = NA, Kappa = NA,
+                   Sensitivity = NA, Features = "—", Groups = "—",
+                   stringsAsFactors = FALSE)
+      }
+    }))
+    df <- df[order(df$Fold), ]
+    df$Fold <- as.character(df$Fold)
+    df
+  }, striped = TRUE, hover = TRUE, width = "100%", digits = 4)
+
+  output$time_score <- renderUI({
+    req(rv$scored, rv$time_score)
+    lbl <- if (isTRUE(input$run_mccv_mode)) "Parallel MCCV runtime" else "Scoring + model runtime"
+    time_banner_ui(rv$time_score, lbl)
   })
 
   # Single Fold Renderers: Group Scores Table
@@ -823,12 +1431,12 @@ server <- function(input, output, session) {
     req(rv$score_results)
     accs <- vapply(rv$score_results, \(x) x$accuracy, numeric(1))
     accs <- sort(accs, decreasing = TRUE)
-    par(bg = "transparent", col.axis = "#aaa", col.lab = "#aaa",
-        col.main = "#ccc", fg = "#555", mar = c(8, 4, 2, 1))
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        col.main = "#cccccc", fg = "#555555", mar = c(8, 4, 2, 1))
     bp <- barplot(accs, col = "#4a90d9", border = NA,
                   main = "", ylab = "Accuracy", las = 2, ylim = c(0, 1),
                   names.arg = names(accs), cex.names = 0.7)
-    abline(h = 0.5, col = "#888", lty = 2)
+    abline(h = 0.5, col = "#888888", lty = 2)
   }, bg = "transparent")
 
   # Single Fold Renderers: Final Joint Model Value Boxes
@@ -881,10 +1489,10 @@ server <- function(input, output, session) {
   output$plot_mccv_folds <- renderPlot({
     req(rv$mccv_results)
     df <- rv$mccv_results$raw_metrics
-    par(bg = "transparent", col.axis = "#aaa", col.lab = "#aaa",
-        col.main = "#ccc", fg = "#555", mar = c(6, 4, 2, 1))
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        col.main = "#cccccc", fg = "#555555", mar = c(6, 4, 2, 1))
     boxplot(df, col = c("#4a90d9", "#e06666", "#6aa84f", "#f1c232", "#8e7cc3", "#e06666"),
-            border = "#ccc", las = 2, main = "", ylab = "Value", ylim = c(0, 1))
+            border = "#cccccc", las = 2, main = "", ylab = "Value", ylim = c(0, 1))
   }, bg = "transparent")
 
   # Parallel MCCV Renderers: Stability ranking table
@@ -957,11 +1565,11 @@ server <- function(input, output, session) {
     accs <- df_sub$Mean_Accuracy
     names(accs) <- df_sub$Group
     
-    par(bg = "transparent", col.axis = "#aaa", col.lab = "#aaa",
-        col.main = "#ccc", fg = "#555", mar = c(8, 4, 2, 1))
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        col.main = "#cccccc", fg = "#555555", mar = c(8, 4, 2, 1))
     bp <- barplot(accs, col = "#4a90d9", border = NA,
                   main = "", ylab = "Mean Accuracy (%)", las = 2, ylim = c(0, 100))
-    abline(h = 50, col = "#888", lty = 2)
+    abline(h = 50, col = "#888888", lty = 2)
   }, bg = "transparent")
 }
 
