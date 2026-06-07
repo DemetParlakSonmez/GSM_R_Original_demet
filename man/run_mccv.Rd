@@ -15,8 +15,10 @@ run_mccv(
   score_args = list(),
   model_args = list(),
   top_n = 10,
+  shave = TRUE,
+  fdr_alpha = 0.05,
   cores = NULL,
-  seed = 42,
+  seed = 44,
   ...
 )
 }

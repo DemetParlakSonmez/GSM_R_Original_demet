@@ -15,6 +15,8 @@ mccv_run_fold(
   score_args = list(),
   model_args = list(),
   top_n = 10,
+  shave = TRUE,
+  fdr_alpha = 0.05,
   seed = 42
 )
 }

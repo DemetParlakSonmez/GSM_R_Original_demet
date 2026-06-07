@@ -23,17 +23,26 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
                           pre_score_method = "anova", pre_score_top_percent = 1,
                           score_method = "rf", model_method = "rf",
                           score_args = list(), model_args = list(),
-                          top_n = 10, seed = 42) {
+                          top_n = 10, shave = TRUE, fdr_alpha = 0.05, seed = 42) {
   fold_seed <- seed + fold
   tryCatch({
     split <- split_train_test(dataset$labels, ratio = train_ratio, seed = fold_seed)
 
-    # Candidate groups (optional ANOVA pre-filter; "all groups" => top 100%).
+    # Phase I — training-only gene shaving (Welch t-test + BH FDR), then group.
+    keep_genes <- if (isTRUE(shave))
+      shave_genes(dataset$expr, dataset$labels, split$train, alpha = fdr_alpha)
+    else rownames(dataset$expr)
+
+    # Candidate groups: optional ANOVA group pre-filter, then shave their genes.
     candidates <- pre_score_groups(dataset, split$train,
                                    method = pre_score_method,
                                    top_percent = pre_score_top_percent)
+    pre_sc <- attr(candidates, "scores")
+    candidates <- shave_groups(candidates, keep_genes)
+    if (length(candidates) == 0)
+      stop("No groups survived gene shaving (FDR ", fdr_alpha, ").")
 
-    # 1) SCORE each candidate group on TRAINING ONLY (no test leakage) -> rank.
+    # Phase II — SCORE each candidate (mean F1, k-fold CV, TRAIN only) -> rank.
     scores <- vapply(names(candidates), function(name) {
       do.call(score_group_train, c(
         list(expr = dataset$expr, labels = dataset$labels,
@@ -43,24 +52,27 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     }, numeric(1))
     ranked <- names(sort(scores, decreasing = TRUE))
 
-    # 2) ACCUMULATIVE MODELING: top-1, top-1..2, ..., top-1..K on the test set.
+    # Phase III — ACCUMULATIVE MODELING top-1..K; skip k that add no new genes.
     K <- min(top_n, length(ranked))
-    acc_rows <- vector("list", K)
-    best_model <- NULL
+    acc_rows <- list(); best_model <- NULL; prev_features <- 0L
     for (k in seq_len(K)) {
       sub <- candidates[ranked[seq_len(k)]]
+      n_feat <- length(unique(unlist(sub)))
+      if (n_feat == prev_features) next            # expand: no new features at this k
+      prev_features <- n_feat
       m <- do.call(build_model, c(
         list(expr = dataset$expr, labels = dataset$labels, top_groups = sub,
              train_idx = split$train, method = model_method),
         model_args))
-      acc_rows[[k]] <- data.frame(
+      acc_rows[[length(acc_rows) + 1L]] <- data.frame(
         k = k, group_added = ranked[k], n_features = length(m$features),
         Accuracy = m$metrics$Accuracy, Sensitivity = m$metrics$Sensitivity,
         Specificity = m$metrics$Specificity, Precision = m$metrics$Precision,
         F_measure = m$metrics$F_measure, Cohens_kappa = m$metrics$Cohens_kappa,
         stringsAsFactors = FALSE)
       m$.k <- k
-      if (is.null(best_model) || m$metrics$Accuracy > best_model$metrics$Accuracy)
+      # Best model = highest F1 (the G-S-M selection metric).
+      if (is.null(best_model) || m$metrics$F_measure > best_model$metrics$F_measure)
         best_model <- m
     }
     accumulative <- do.call(rbind, acc_rows)
@@ -69,14 +81,15 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     list(
       fold = fold,
       status = "success",
-      metrics = best_model$metrics,               # performance at the best k
+      metrics = best_model$metrics,               # performance at the best k (by F1)
       best_k = best_k,
       features_count = length(best_model$features),
       n_groups = best_k,
+      n_shaved_genes = length(keep_genes),         # genes surviving Welch+BH
       accumulative = accumulative,                 # top-1..K performance curve
       ranked_groups = ranked,
-      group_accuracies = scores,                   # train-only ranking scores
-      pre_scores = attr(candidates, "scores"),     # sorted ANOVA scores (all groups)
+      group_accuracies = scores,                   # train-only mean-F1 ranking scores
+      pre_scores = pre_sc,                         # sorted ANOVA scores (all groups)
       importance = best_model$importance           # per-gene RF importance @ best k
     )
   }, error = function(e) {
@@ -111,7 +124,8 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
                      pre_score_method = "anova", pre_score_top_percent = 1,
                      score_method = "rf", model_method = "rf",
                      score_args = list(), model_args = list(),
-                     top_n = 10, cores = NULL, seed = 42, ...) {
+                     top_n = 10, shave = TRUE, fdr_alpha = 0.05,
+                     cores = NULL, seed = 44, ...) {
   stopifnot(inherits(dataset, "gsm_dataset"))
   stopifnot(is.numeric(n_iterations) && n_iterations > 0)
   stopifnot(is.numeric(train_ratio) && train_ratio > 0 && train_ratio < 1)
@@ -132,7 +146,8 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
                   pre_score_top_percent = pre_score_top_percent,
                   score_method = score_method, model_method = model_method,
                   score_args = score_args, model_args = model_args,
-                  top_n = top_n, seed = seed)
+                  top_n = top_n, shave = shave, fdr_alpha = fdr_alpha,
+                  seed = seed)
   }
 
   # Run in parallel or sequentially based on cores and OS

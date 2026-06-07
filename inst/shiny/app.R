@@ -309,7 +309,7 @@ ui <- page_navbar(
                     min = 5, max = 100, value = 20, step = 5),
         sliderInput("train_ratio", "Training ratio",
                     min = 0.5, max = 0.9, value = 0.7, step = 0.05),
-        numericInput("prescore_seed", "Random seed", value = 42),
+        numericInput("prescore_seed", "Random seed", value = 44),
         tags$hr(),
         checkboxInput("prescore_detail",
                       "Show detailed info (per-group scores + charts)",
@@ -417,6 +417,16 @@ ui <- page_navbar(
           numericInput("knn_k", "Neighbors (k)", value = 3, min = 1, max = 20, step = 1)
         ),
         
+        # Phase I gene shaving: training-only Welch t-test + BH-FDR filter.
+        checkboxInput("shave_genes",
+                      "Gene shaving (Welch t-test + BH FDR, training only)",
+                      value = TRUE),
+        conditionalPanel(
+          condition = "input.shave_genes",
+          numericInput("fdr_alpha", "FDR threshold (alpha)",
+                       value = 0.05, min = 0.001, max = 0.5, step = 0.01)
+        ),
+
         radioButtons("score_scope", "Which groups to score",
                      choices = c("Top pre-scored groups (recommended)" = "selected",
                                  "All groups (skip pre-score filter)" = "all"),
@@ -426,7 +436,7 @@ ui <- page_navbar(
         numericInput("n_top_groups",
                      "Accumulative depth (top-K groups to model)",
                      value = 10, min = 1),
-        numericInput("score_seed", "Random seed", value = 42),
+        numericInput("score_seed", "Random seed", value = 44),
 
         tags$hr(),
         checkboxInput("run_mccv_mode", "Run Multi-Fold Parallel MCCV?", value = FALSE),
@@ -1296,12 +1306,22 @@ server <- function(input, output, session) {
             auto_prescored <- TRUE
           }
         }
-        K <- min(input$n_top_groups, length(candidates))
 
         results <- list()
-        final_model <- NULL; best_k <- NA_integer_
-        withProgress(message = "Scoring (train-only) + accumulative modeling...", value = 0, {
-          # 1) Score each candidate group on TRAINING only -> rank.
+        final_model <- NULL; best_k <- NA_integer_; n_shaved <- NA_integer_
+        withProgress(message = "Gene shaving + scoring + accumulative modeling...", value = 0, {
+          # Phase I — training-only gene shaving (Welch t-test + BH FDR).
+          if (isTRUE(input$shave_genes)) {
+            keep_genes <- shave_genes(rv$dataset$expr, rv$dataset$labels,
+                                      rv$train_idx, alpha = input$fdr_alpha)
+            candidates <- shave_groups(candidates, keep_genes)
+            n_shaved <- length(keep_genes)
+            validate(need(length(candidates) > 0,
+                          "No groups survived gene shaving — raise the FDR threshold."))
+          }
+          K <- min(input$n_top_groups, length(candidates))
+
+          # Phase II — score each candidate (mean F1, k-fold CV, TRAIN only) -> rank.
           scores <- numeric(length(candidates)); names(scores) <- names(candidates)
           for (i in seq_along(candidates)) {
             gname <- names(candidates)[i]
@@ -1315,24 +1335,26 @@ server <- function(input, output, session) {
           }
           ranked <- names(sort(scores, decreasing = TRUE))
 
-          # 2) Accumulative top-1..K models, evaluated on the held-out test split.
-          acc_rows <- vector("list", K); best_model <- NULL
+          # Phase III — accumulative top-1..K; skip k that add no new features.
+          acc_rows <- list(); best_model <- NULL; prev_features <- 0L
           for (k in seq_len(K)) {
             setProgress(0.5 + 0.5 * k / K,
                         detail = sprintf("Modeling top-%d / %d groups", k, K))
             sub <- candidates[ranked[seq_len(k)]]
+            if (length(unique(unlist(sub))) == prev_features) next
+            prev_features <- length(unique(unlist(sub)))
             m <- do.call(build_model, c(
               list(expr = rv$dataset$expr, labels = rv$dataset$labels,
                    top_groups = sub, train_idx = rv$train_idx,
                    method = input$score_method), score_args))
-            acc_rows[[k]] <- data.frame(
+            acc_rows[[length(acc_rows) + 1L]] <- data.frame(
               k = k, group_added = ranked[k], n_features = length(m$features),
               Accuracy = m$metrics$Accuracy, Sensitivity = m$metrics$Sensitivity,
               Specificity = m$metrics$Specificity, Precision = m$metrics$Precision,
               F_measure = m$metrics$F_measure, Cohens_kappa = m$metrics$Cohens_kappa,
               stringsAsFactors = FALSE)
             m$.k <- k
-            if (is.null(best_model) || m$metrics$Accuracy > best_model$metrics$Accuracy)
+            if (is.null(best_model) || m$metrics$F_measure > best_model$metrics$F_measure)
               best_model <- m
           }
           final_model      <- best_model
@@ -1350,6 +1372,9 @@ server <- function(input, output, session) {
           dataset_name = rv$dataset_name %||% "dataset",
           modeling = sprintf("accumulative top-1..%d (best k = %d)", K, best_k),
           best_k = best_k,
+          gene_shaving = if (isTRUE(input$shave_genes))
+            sprintf("Welch t-test + BH FDR %.3g (%d genes kept)", input$fdr_alpha, n_shaved)
+            else "off",
           scope = if (scope_all) "All groups (pre-score filter skipped)"
                   else if (auto_prescored) "Top pre-scored groups (auto, on the fly)"
                   else "Top pre-scored groups",
@@ -1393,7 +1418,8 @@ server <- function(input, output, session) {
           pre_score_top_percent = fold_top_pct,
           score_method = input$score_method, model_method = m_method,
           score_args = score_args, model_args = model_args,
-          top_n = input$n_top_groups, seed = input$score_seed
+          top_n = input$n_top_groups, shave = isTRUE(input$shave_genes),
+          fdr_alpha = input$fdr_alpha, seed = input$score_seed
         )
         mc$n      <- input$mccv_iterations
         mc$cores  <- input$mccv_cores
@@ -1450,6 +1476,11 @@ server <- function(input, output, session) {
           mode = "mccv",
           modeling = sprintf("accumulative top-1..%d per fold", p$top_n %||% 10),
           ranking = "group classifier score (train-only)",
+          gene_shaving = if (isTRUE(p$shave))
+            sprintf("Welch t-test + BH FDR %.3g (mean %.0f genes/fold)",
+                    p$fdr_alpha %||% 0.05,
+                    mean(vapply(ok, function(r) r$n_shaved_genes %||% NA_real_, numeric(1)),
+                         na.rm = TRUE)) else "off",
           best_k = best_k_mode,
           dataset_name = rv$dataset_name %||% "dataset",
           scope = if (isTRUE(mc$scope_all)) "All groups (pre-score keeps 100%/fold)"
@@ -1489,7 +1520,8 @@ server <- function(input, output, session) {
         pre_score_top_percent = p$pre_score_top_percent,
         score_method = p$score_method, model_method = p$model_method,
         score_args = p$score_args, model_args = p$model_args,
-        top_n = p$top_n %||% 10, seed = p$seed)
+        top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
+        fdr_alpha = p$fdr_alpha %||% 0.05, seed = p$seed)
       res <- if (mc$cores > 1 && .Platform$OS.type != "windows") {
         parallel::mclapply(idx, runner, mc.cores = mc$cores)
       } else {
@@ -1613,6 +1645,7 @@ server <- function(input, output, session) {
       list(
         row("Mode", "Single-fold scoring"),
         row("Modeling", s$modeling %||% "accumulative top-k"),
+        row("Gene shaving", s$gene_shaving %||% "off"),
         row("Ranking", s$ranking %||% "group classifier score (train-only)"),
         row("Groups source", s$scope),
         row("Scoring algorithm", s$classifier),
@@ -1635,6 +1668,7 @@ server <- function(input, output, session) {
       list(
         row("Mode", sprintf("Parallel MCCV · %d cores", s$cores)),
         row("Modeling", s$modeling %||% "accumulative top-k per fold"),
+        row("Gene shaving", s$gene_shaving %||% "off"),
         row("Ranking", s$ranking %||% "group classifier score (train-only)"),
         row("Most frequent best k", s$best_k %||% NA),
         row("Groups source", s$scope),

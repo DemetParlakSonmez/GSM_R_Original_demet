@@ -2,9 +2,9 @@
 % Please edit documentation in R/score.R
 \name{score_group_train}
 \alias{score_group_train}
-\title{Score a single group using TRAINING data only}
+\title{Score a single group using TRAINING data only (mean F1 via k-fold CV)}
 \usage{
-score_group_train(expr, labels, genes, train_idx, method = "rf", cv = 5, ...)
+score_group_train(expr, labels, genes, train_idx, method = "rf", cv = 3, ...)
 }
 \arguments{
 \item{expr}{Numeric matrix (genes x samples).}
@@ -17,16 +17,16 @@ score_group_train(expr, labels, genes, train_idx, method = "rf", cv = 5, ...)
 
 \item{method}{Classifier method (\code{"rf"}, \code{"svm"}, \code{"knn"}).}
 
-\item{cv}{Internal CV folds for SVM (default 5). KNN uses leave-one-out.}
+\item{cv}{Number of stratified CV folds (default 3, per the paper).}
 
 \item{...}{Additional arguments passed to the classifier.}
 }
 \value{
-A single numeric training-only accuracy (NA if no usable genes).
+A single numeric mean-F1 score (NA if no usable genes).
 }
 \description{
-Computes a ranking score for a group without touching the held-out test
-samples — Random Forest out-of-bag accuracy, SVM internal cross-validation,
-or KNN leave-one-out on the training split. This is the criterion used to
-rank groups for the accumulative modeling step.
+Computes a ranking score for a group as the mean F1 across stratified
+k-fold cross-validation on the training partition only (no test leakage),
+matching the G-S-M Scoring phase. This is the criterion used to rank groups
+for the accumulative modeling step.
 }
