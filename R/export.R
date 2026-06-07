@@ -67,6 +67,7 @@ gsm_tbl_iteration_metrics <- function(folds) {
       Precision    = getm(m, "Precision"),
       F_measure    = getm(m, "F_measure"),
       Cohens_kappa = getm(m, "Cohens_kappa"),
+      AUC          = getm(m, "AUC"),
       Features     = if (ok) f$features_count %|null|% NA_integer_ else NA_integer_,
       Groups       = if (ok) f$n_groups %|null|% NA_integer_ else NA_integer_,
       stringsAsFactors = FALSE
@@ -115,6 +116,8 @@ gsm_tbl_accumulative_summary <- function(folds) {
   long <- do.call(rbind, accs)
   metrics <- c("Accuracy", "Sensitivity", "Specificity", "Precision",
                "F_measure", "Cohens_kappa")
+  if ("AUC" %in% names(long)) metrics <- c(metrics, "AUC")
+  ci_metrics <- intersect(c("Accuracy", "F_measure", "AUC"), metrics)
   ks <- sort(unique(long$k))
   rows <- lapply(ks, function(kk) {
     sub <- long[long$k == kk, , drop = FALSE]
@@ -124,6 +127,11 @@ gsm_tbl_accumulative_summary <- function(folds) {
     for (m in metrics) {
       row[[paste0("Mean_", m)]] <- round(mean(sub[[m]], na.rm = TRUE), 4)
       row[[paste0("SD_", m)]]   <- round(stats::sd(sub[[m]], na.rm = TRUE), 4)
+    }
+    for (m in ci_metrics) {                          # bootstrap-style percentile CI
+      ci <- pct_ci(sub[[m]])
+      row[[paste0("CI_low_", m)]]  <- round(ci[["low"]], 4)
+      row[[paste0("CI_high_", m)]] <- round(ci[["high"]], 4)
     }
     row
   })
@@ -145,25 +153,24 @@ gsm_tbl_iteration_accumulative <- function(folds) {
   do.call(rbind, rows)
 }
 
-#' Aggregate best-k metric summary. Uses `result$metrics_summary` when present,
-#' otherwise computes from per-fold best-k metrics.
+#' Aggregate best-k metric summary with bootstrap-style 95\% CIs.
+#' Computed from the per-fold best-k metrics (mean, SD, 2.5/97.5 percentiles).
 #' @keywords internal
 gsm_tbl_metric_summary <- function(result) {
-  ms <- result$metrics_summary
-  if (!is.null(ms)) {
-    return(data.frame(Metric = rownames(ms),
-                      Mean = round(ms$Mean, 6), SD = round(ms$SD, 6),
-                      stringsAsFactors = FALSE))
-  }
   im <- gsm_tbl_iteration_metrics(result$folds)
   cols <- c("Accuracy", "Sensitivity", "Specificity", "Precision",
-            "F_measure", "Cohens_kappa")
-  data.frame(
-    Metric = cols,
-    Mean = round(vapply(cols, function(c) mean(im[[c]], na.rm = TRUE), numeric(1)), 6),
-    SD   = round(vapply(cols, function(c) stats::sd(im[[c]], na.rm = TRUE), numeric(1)), 6),
-    stringsAsFactors = FALSE
-  )
+            "F_measure", "Cohens_kappa", "AUC")
+  cols <- cols[cols %in% names(im)]
+  do.call(rbind, lapply(cols, function(cc) {
+    v <- im[[cc]]
+    ci <- pct_ci(v)
+    data.frame(Metric = cc,
+               Mean = round(mean(v, na.rm = TRUE), 4),
+               SD   = round(stats::sd(v, na.rm = TRUE), 4),
+               CI_low  = round(ci[["low"]], 4),
+               CI_high = round(ci[["high"]], 4),
+               stringsAsFactors = FALSE)
+  }))
 }
 
 #' Group <-> feature associations over all iterations
@@ -344,9 +351,11 @@ gsm_export_tables <- function(result, dataset, summary = NULL, top_n = 10) {
     MetricSummary         = gsm_tbl_metric_summary(result),
     IterationGroupScores  = gsm_tbl_iteration_group_scores(folds, dataset),
     GroupRanking          = gsm_tbl_group_ranking(folds, dataset, top_n = top_n),
+    GroupRRA              = gsm_tbl_group_rra(folds),
     GroupFeatureAssoc     = gsm_tbl_group_feature_assoc(folds, dataset),
     PreScoreSignificance  = gsm_tbl_pre_score_significance(folds),
-    RankedFeatures        = gsm_tbl_ranked_features(folds, dataset)
+    RankedFeatures        = gsm_tbl_ranked_features(folds, dataset),
+    FeatureRRA            = gsm_tbl_feature_rra(folds)
   )
   # Drop tables that are empty/NULL (e.g. pre-scores absent for method "none").
   Filter(function(x) !is.null(x) && nrow(x) > 0, tbls)
@@ -387,9 +396,11 @@ gsm_write_xlsx <- function(tables, file) {
   MetricSummary         = "MetricSummary_bestK",
   IterationGroupScores  = "IterationGroupScores",
   GroupRanking          = "RankdGroups_by_Freq",
+  GroupRRA              = "RankedGroups_by_RRA",
   GroupFeatureAssoc     = "Groups_Features_Associations_over_all_iterations",
   PreScoreSignificance  = "PreScoreSignificance",
   RankedFeatures        = "rankedFeatures",
+  FeatureRRA            = "rankedFeatures_by_RRA",
   Accumulative          = "res1_Accumulative",
   FinalMetrics          = "FinalMetrics",
   GroupScores           = "GroupScores",

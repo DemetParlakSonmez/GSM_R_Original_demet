@@ -2,13 +2,13 @@
 % Please edit documentation in R/export.R
 \name{gsm_tbl_metric_summary}
 \alias{gsm_tbl_metric_summary}
-\title{Aggregate best-k metric summary. Uses \code{result$metrics_summary} when present,
-otherwise computes from per-fold best-k metrics.}
+\title{Aggregate best-k metric summary with bootstrap-style 95\\% CIs.
+Computed from the per-fold best-k metrics (mean, SD, 2.5/97.5 percentiles).}
 \usage{
 gsm_tbl_metric_summary(result)
 }
 \description{
-Aggregate best-k metric summary. Uses \code{result$metrics_summary} when present,
-otherwise computes from per-fold best-k metrics.
+Aggregate best-k metric summary with bootstrap-style 95\\% CIs.
+Computed from the per-fold best-k metrics (mean, SD, 2.5/97.5 percentiles).
 }
 \keyword{internal}

@@ -17,6 +17,7 @@ run_mccv(
   top_n = 10,
   shave = TRUE,
   fdr_alpha = 0.05,
+  normalize = FALSE,
   cores = NULL,
   seed = 44,
   ...

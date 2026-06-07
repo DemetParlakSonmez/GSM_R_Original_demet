@@ -103,6 +103,24 @@ normalize_zscore <- function(expr) {
   (expr - row_means) / row_sds
 }
 
+#' Leakage-free per-gene z-score using a training-fitted scaler
+#'
+#' Fits each gene's mean and SD on the TRAINING columns only, then applies that
+#' scaler to every column (train and test). This avoids the test set leaking
+#' into normalization, matching the paper's serialised scaler.
+#'
+#' @param expr Numeric matrix (genes x samples).
+#' @param train_idx Integer vector of training sample indices.
+#' @return Z-score normalized matrix (same dimensions as `expr`).
+#' @export
+zscore_fit_apply <- function(expr, train_idx) {
+  tr <- expr[, train_idx, drop = FALSE]
+  mu <- rowMeans(tr, na.rm = TRUE)
+  sdv <- apply(tr, 1, stats::sd, na.rm = TRUE)
+  sdv[!is.finite(sdv) | sdv == 0] <- 1
+  (expr - mu) / sdv
+}
+
 
 #' Split samples into training and test sets
 #'

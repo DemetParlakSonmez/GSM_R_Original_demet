@@ -96,11 +96,15 @@ build_model_rf <- function(expr, labels, top_groups, train_idx, ...) {
     ...
   )
 
-  # Predict
+  # Predict (class + positive-class probability for AUC)
   predictions <- stats::predict(model, newdata = test_data)
+  prob_pos <- tryCatch({
+    pm <- stats::predict(model, newdata = test_data, type = "prob")
+    if (positive_class %in% colnames(pm)) pm[, positive_class] else NULL
+  }, error = function(e) NULL)
 
   # Metrics
-  metrics <- calc_all_metrics(test_labels, predictions, positive_class)
+  metrics <- calc_all_metrics(test_labels, predictions, positive_class, prob = prob_pos)
 
   # Per-gene Random Forest importance (MeanDecreaseGini), named by gene.
   importance <- tryCatch({
@@ -166,18 +170,23 @@ build_model_svm <- function(expr, labels, top_groups, train_idx, ...) {
   # Determine positive class
   positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
 
-  # Train SVM
+  # Train SVM (probability=TRUE enables positive-class probabilities for AUC)
   model <- e1071::svm(
     x = train_data,
     y = train_labels,
+    probability = TRUE,
     ...
   )
 
-  # Predict
-  predictions <- stats::predict(model, newdata = test_data)
+  # Predict (class + positive-class probability)
+  predictions <- stats::predict(model, newdata = test_data, probability = TRUE)
+  prob_pos <- tryCatch({
+    pm <- attr(predictions, "probabilities")
+    if (!is.null(pm) && positive_class %in% colnames(pm)) pm[, positive_class] else NULL
+  }, error = function(e) NULL)
 
   # Metrics
-  metrics <- calc_all_metrics(test_labels, predictions, positive_class)
+  metrics <- calc_all_metrics(test_labels, predictions, positive_class, prob = prob_pos)
 
   list(
     metrics     = metrics,
@@ -236,16 +245,21 @@ build_model_knn <- function(expr, labels, top_groups, train_idx, ...) {
   # Determine positive class
   positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
 
-  # Predict using KNN (class::knn)
+  # Predict using KNN (prob=TRUE returns the winning-class vote proportion)
   predictions <- class::knn(
     train = train_data,
     test  = test_data,
     cl    = train_labels,
+    prob  = TRUE,
     ...
   )
+  prob_pos <- tryCatch({
+    pr <- attr(predictions, "prob")
+    if (is.null(pr)) NULL else ifelse(predictions == positive_class, pr, 1 - pr)
+  }, error = function(e) NULL)
 
   # Metrics
-  metrics <- calc_all_metrics(test_labels, predictions, positive_class)
+  metrics <- calc_all_metrics(test_labels, predictions, positive_class, prob = prob_pos)
 
   list(
     metrics     = metrics,
