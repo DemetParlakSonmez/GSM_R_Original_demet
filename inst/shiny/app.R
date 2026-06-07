@@ -85,6 +85,16 @@ time_banner_ui <- function(secs, label = "Completed in") {
   )
 }
 
+# Numbered workflow tab title: "(n) <icon> <label>".
+nav_step_title <- function(n, icon, label) {
+  tags$span(
+    class = "nav-step-title",
+    tags$span(class = "nav-step", n),
+    tags$span(class = "nav-ico", icon),
+    tags$span(class = "nav-lbl", label)
+  )
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
@@ -104,29 +114,55 @@ ui <- page_navbar(
   header = tags$head(
     tags$link(rel = "stylesheet", href = "styles.css"),
     tags$style(HTML("
-      /* Pin the navbar so the tabs stay visible while scrolling. */
+      /* ── Professional fixed top bar ───────────────────────────────────── */
       .navbar {
-        position: sticky; top: 0; z-index: 1030;
-        border-bottom: 1px solid rgba(255,255,255,0.12);
+        position: sticky; top: 0; z-index: 1040;
+        background: linear-gradient(135deg, #161a2e 0%, #11152a 100%) !important;
+        border-bottom: 1px solid rgba(255,255,255,0.08);
+        box-shadow: 0 2px 18px rgba(0,0,0,0.45);
+        padding: 0.35rem 0.5rem;
+        min-height: 60px;
       }
-      /* Make the nav tabs clearly legible at all times (not faint). */
+      .navbar-brand { color: #ffffff !important; font-size: 1.15rem; }
+      .navbar-nav { gap: 4px; }
+
+      /* Tabs: clear, tactile, always legible — pill with an active accent. */
       .navbar-nav .nav-link {
-        color: rgba(255,255,255,0.9) !important;
-        opacity: 1 !important;
+        color: rgba(255,255,255,0.72) !important;
         font-weight: 500;
+        padding: 0.5rem 0.9rem !important;
+        border-radius: 8px;
+        display: flex; align-items: center;
+        transition: background .15s ease, color .15s ease;
       }
-      .navbar-nav .nav-link:hover { color: #ffffff !important; }
+      .navbar-nav .nav-link:hover {
+        color: #ffffff !important;
+        background: rgba(255,255,255,0.07);
+      }
       .navbar-nav .nav-link.active {
         color: #ffffff !important;
-        font-weight: 700;
-        border-bottom: 3px solid #ffffff !important;
+        background: rgba(74,144,217,0.20);
+        box-shadow: inset 0 -3px 0 #4a90d9;
       }
+
+      /* Step badges (workflow order: 1 Data -> 4 Score). */
+      .nav-step {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 22px; height: 22px; border-radius: 50%;
+        background: rgba(255,255,255,0.14); color: #fff;
+        font-size: 0.72rem; font-weight: 700; margin-right: 8px;
+      }
+      .nav-link.active .nav-step { background: #4a90d9; }
+      .nav-ico { margin-right: 6px; font-size: 0.95rem; }
+      /* Step connector arrows between tabs. */
+      .nav-step-sep { color: rgba(255,255,255,0.25); align-self: center; padding: 0 2px; }
     "))
   ),
 
   # ── Tab 1: Data Upload ───────────────────────────────────────────────────
   nav_panel(
-    title = "\U0001F4C2 Data",
+    value = "data",
+    title = nav_step_title("1", "\U0001F4C2", "Data"),
     layout_sidebar(
       sidebar = sidebar(
         title = "Upload Files",
@@ -207,7 +243,8 @@ ui <- page_navbar(
 
   # ── Tab 2: Replicate Collapsing ──────────────────────────────────────────
   nav_panel(
-    title = "\U0001F501 Replicates",
+    value = "replicates",
+    title = nav_step_title("2", "\U0001F501", "Replicates"),
     layout_sidebar(
       sidebar = sidebar(
         title = "Collapsing Settings",
@@ -260,7 +297,8 @@ ui <- page_navbar(
 
   # ── Tab 3: Pre-Scoring ──────────────────────────────────────────────────
   nav_panel(
-    title = "\U0001F4CA Pre-Score",
+    value = "prescore",
+    title = nav_step_title("3", "\U0001F4CA", "Pre-Score"),
     layout_sidebar(
       sidebar = sidebar(
         title = "Pre-Scoring Settings",
@@ -343,7 +381,8 @@ ui <- page_navbar(
 
   # ── Tab 4: Scoring ─────────────────────────────────────────────────────
   nav_panel(
-    title = "\U0001F3AF Score",
+    value = "score",
+    title = nav_step_title("4", "\U0001F3AF", "Score"),
     layout_sidebar(
       sidebar = sidebar(
         title = "Scoring Settings",
@@ -441,6 +480,19 @@ ui <- page_navbar(
         condition = "output.score_done && !output.mccv_running",
         uiOutput("time_score"),
         uiOutput("score_summary"),
+
+        # ── Export results (Excel workbook + CSV bundle) ──────────────────
+        card(
+          card_header("\U0001F4BE Export results"),
+          uiOutput("export_note"),
+          tags$div(
+            class = "d-flex gap-2 flex-wrap",
+            downloadButton("dl_xlsx", "Download Excel workbook (.xlsx)",
+                           class = "btn-primary"),
+            downloadButton("dl_csv", "Download CSV bundle (.zip)",
+                           class = "btn-outline-light")
+          )
+        ),
 
         # Display Single Fold Mode Results
         conditionalPanel(
@@ -609,6 +661,7 @@ server <- function(input, output, session) {
         rv$groups    <- groups
         rv$dataset   <- ds
         rv$loaded    <- TRUE
+        rv$dataset_name <- tools::file_path_sans_ext(basename(expr_path))
 
         # Reset downstream
         rv$collapsed <- FALSE
@@ -1113,15 +1166,13 @@ server <- function(input, output, session) {
       return(alert_box("warn", "Step 1 — Load a dataset",
                        "Go to the <b>📂 Data</b> tab and load (or pick) an expression + grouping file."))
     }
-    if (!isTRUE(rv$prescored) || is.null(rv$train_idx)) {
-      return(alert_box("warn", "Step 2 — Run Pre-Score first",
-        "Scoring needs the selected groups and train/test split. Go to <b>📊 Pre-Score</b> and click <b>Run Pre-Scoring</b>, then return here."))
-    }
     if (!requireNamespace(req_pkg, quietly = TRUE)) {
       return(alert_box("error", paste0("Missing package: ", req_pkg),
         sprintf("%s needs the R package <b>%s</b>, which isn't installed.<br>Install it in R: <code>install.packages(\"%s\")</code>, then click Run Analysis.",
                 method_lbl, req_pkg, req_pkg)))
     }
+    # Pre-Score is OPTIONAL — Score creates its own split and pre-scores on the
+    # fly when needed. We just describe what will happen.
     n_pre <- length(rv$prescore_groups %||% list())
     scope_txt <- if (identical(input$score_scope, "all")) {
       sprintf("Will score <b>ALL %d groups</b> (pre-score filter skipped)%s.",
@@ -1132,11 +1183,14 @@ server <- function(input, output, session) {
       heavy <- if (est > 100)
         sprintf(" <span style='color:#f1c232'>⚠️ ~%d groups/fold × %d folds — this can take many minutes and the app is busy during each parallel batch.</span>",
                 est, input$mccv_iterations %||% 0) else ""
-      sprintf("Will score the <b>top %s%%</b> (~%d) pre-scored groups per fold.%s",
+      sprintf("Will pre-score &amp; score the <b>top %s%%</b> (~%d) groups per fold.%s",
               input$top_percent, est, heavy)
-    } else {
+    } else if (isTRUE(rv$prescored) && n_pre > 0) {
       sprintf("Will score the <b>top %d</b> of %d pre-scored groups.",
               min(input$n_top_groups %||% 10, n_pre), n_pre)
+    } else {
+      sprintf("No pre-scoring run yet — Score will pre-score automatically (top %s%%) and score the <b>top %d</b>. Run the <b>📊 Pre-Score</b> tab first if you want its detailed view.",
+              input$top_percent, input$n_top_groups %||% 10)
     }
     alert_box("ok", paste0("Ready — ", method_lbl, " · ", mode_lbl),
               paste0(scope_txt, " Click <b>🚀 Run Analysis</b>."))
@@ -1148,18 +1202,11 @@ server <- function(input, output, session) {
                        type = "warning", duration = 6)
       return()
     }
-    # Guard: scoring needs a pre-scoring run first (it provides the selected
-    # groups + the train/test split). Tell the user instead of failing silently.
+    # Only a loaded dataset is required. Pre-Score is optional — Score creates
+    # its own train/test split and pre-scores on the fly when needed.
     if (!isTRUE(rv$loaded)) {
       showNotification("⚠️ Load a dataset on the Data tab first.",
                        type = "warning", duration = 8)
-      return()
-    }
-    if (!isTRUE(rv$prescored) || is.null(rv$train_idx)) {
-      showNotification(paste0("⚠️ Run Pre-Score first — go to the ",
-                              "\U0001F4CA Pre-Score tab and click 'Run Pre-Scoring', ",
-                              "then come back and Run Analysis."),
-                       type = "warning", duration = 10)
       return()
     }
 
@@ -1204,20 +1251,36 @@ server <- function(input, output, session) {
 
       if (!input$run_mccv_mode) {
         # ── SINGLE FOLD SCORING ─────────────────────────────────────────────
+        # Pre-Score is optional: make a train/test split now if none exists.
+        if (is.null(rv$train_idx)) {
+          split <- split_train_test(rv$dataset$labels,
+                                    ratio = input$train_ratio,
+                                    seed = input$prescore_seed)
+          rv$train_idx <- split$train
+        }
+
         # Scope: pre-selected top groups (trim to top N) OR all groups.
         scope_all <- identical(input$score_scope, "all")
+        auto_prescored <- FALSE
         if (scope_all) {
           groups_to_score <- rv$dataset$groups          # every group, no top-N cap
         } else {
-          groups_to_score <- rv$prescore_groups          # pre-scored set...
-          keep <- min(input$n_top_groups, length(groups_to_score))
-          groups_to_score <- groups_to_score[seq_len(keep)]  # ...trimmed to top N
+          gs <- rv$prescore_groups
+          if (is.null(gs)) {                             # no Pre-Score run → do it now
+            gs <- pre_score_groups(rv$dataset, rv$train_idx,
+                                   method = input$prescore_method,
+                                   top_percent = input$top_percent)
+            auto_prescored <- TRUE
+          }
+          keep <- min(input$n_top_groups, length(gs))
+          groups_to_score <- gs[seq_len(keep)]           # ...trimmed to top N
         }
         n <- length(groups_to_score)
         scope_msg <- if (scope_all)
           sprintf("ALL %d groups", n)
         else
-          sprintf("top %d of %d pre-scored groups", n, length(rv$prescore_groups))
+          sprintf("top %d groups%s", n,
+                  if (auto_prescored) " (auto pre-scored)" else "")
 
         results <- list()
         withProgress(message = paste0("Scoring ", scope_msg, "…"), value = 0, {
@@ -1266,13 +1329,15 @@ server <- function(input, output, session) {
 
         rv$score_summary <- list(
           mode = "single",
+          dataset_name = rv$dataset_name %||% "dataset",
           scope = if (scope_all) "All groups (pre-score filter skipped)"
+                  else if (auto_prescored) "Top pre-scored groups (auto, on the fly)"
                   else "Top pre-scored groups",
           classifier = classifier_label(input$score_method),
           params = format_params(score_args),
           n_groups_scored = n,
           n_groups_available = if (scope_all) rv$dataset$params$n_groups
-                               else length(rv$prescore_groups),
+                               else length(rv$prescore_groups %||% groups_to_score),
           n_features = length(final_model$features),
           prescore_method = if (scope_all) "skipped" else input$prescore_method,
           prescore_top_percent = input$top_percent,
@@ -1360,6 +1425,7 @@ server <- function(input, output, session) {
         feats_per_fold  <- vapply(ok, function(r) r$features_count %||% NA_integer_, integer(1))
         rv$score_summary <- list(
           mode = "mccv",
+          dataset_name = rv$dataset_name %||% "dataset",
           scope = if (isTRUE(mc$scope_all)) "All groups (pre-score keeps 100%/fold)"
                   else "Top pre-scored groups",
           classifier = classifier_label(p$score_method),
@@ -1559,6 +1625,65 @@ server <- function(input, output, session) {
       items
     )
   })
+
+  # ── Results export (Excel + CSV bundle) ────────────────────────────────
+  # Assemble the in-memory result object for the export functions.
+  assemble_result <- reactive({
+    if (isTRUE(input$run_mccv_mode)) {
+      req(rv$mccv_results); rv$mccv_results
+    } else {
+      req(rv$score_results, rv$final_model)
+      list(score_results = rv$score_results, final_model = rv$final_model)
+    }
+  })
+
+  output$export_note <- renderUI({
+    req(rv$scored)
+    if (isTRUE(input$run_mccv_mode)) {
+      ok <- Filter(function(r) !is.null(r) && r$status == "success",
+                   rv$mccv_results$folds %||% list())
+      n_groups <- length(unique(unlist(lapply(ok, function(f) names(f$group_accuracies)))))
+      tags$p(class = "text-muted",
+             sprintf("Results kept: %d iterations × %d distinct groups scored. Includes per-iteration scores, ranked groups, group–feature associations, ranked features, and pre-score significance.",
+                     length(ok), n_groups))
+    } else {
+      tags$p(class = "text-muted",
+             sprintf("Results kept: %d scored groups + final joint model.",
+                     length(rv$score_results %||% list())))
+    }
+  })
+
+  .do_export <- function(file, fmt) {
+    tryCatch({
+      tbls <- gsm_export_tables(assemble_result(), rv$dataset, rv$score_summary)
+      if (fmt == "xlsx") {
+        gsm_write_xlsx(tbls, file)
+      } else {
+        prefix <- sprintf("%s_GSMwith%s",
+                          rv$score_summary$dataset_name %||% "dataset",
+                          switch(rv$score_summary$classifier %||% "model",
+                                 "Random Forest" = "RandomForest",
+                                 "Support Vector Machine" = "SVM",
+                                 "K-Nearest Neighbors" = "KNN",
+                                 rv$score_summary$classifier))
+        gsm_write_csv_zip(tbls, file, prefix = prefix)
+      }
+    }, error = function(e) {
+      showNotification(paste("❌ Export failed:", conditionMessage(e)),
+                       type = "error", duration = 12)
+      # Write a small note so the download isn't an empty/corrupt file.
+      writeLines(paste("Export failed:", conditionMessage(e)), file)
+    })
+  }
+
+  output$dl_xlsx <- downloadHandler(
+    filename = function() gsm_export_filename(rv$score_summary, rv$dataset, "xlsx"),
+    content  = function(file) .do_export(file, "xlsx")
+  )
+  output$dl_csv <- downloadHandler(
+    filename = function() gsm_export_filename(rv$score_summary, rv$dataset, "zip"),
+    content  = function(file) .do_export(file, "csv")
+  )
 
   output$time_score <- renderUI({
     req(rv$scored, rv$time_score)

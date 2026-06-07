@@ -26,7 +26,9 @@ mccv_run_fold(
 }
 \value{
 A list with \code{fold}, \code{status} ("success"/"error"), and on success
-\code{metrics}, \code{features_count}, and \code{group_accuracies}.
+\code{metrics}, \code{features_count}, \code{n_groups}, \code{group_accuracies}, \code{pre_scores}
+(sorted pre-scoring scores for all groups), and \code{importance} (per-gene RF
+importance, \code{NULL} for SVM/KNN).
 }
 \description{
 Executes one Monte Carlo CV iteration: stratified split, pre-scoring,

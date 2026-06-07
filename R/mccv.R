@@ -15,7 +15,9 @@ NULL
 #' @param train_ratio,pre_score_method,pre_score_top_percent,score_method,model_method,score_args,model_args,seed
 #'   See [run_mccv()].
 #' @return A list with `fold`, `status` ("success"/"error"), and on success
-#'   `metrics`, `features_count`, and `group_accuracies`.
+#'   `metrics`, `features_count`, `n_groups`, `group_accuracies`, `pre_scores`
+#'   (sorted pre-scoring scores for all groups), and `importance` (per-gene RF
+#'   importance, `NULL` for SVM/KNN).
 #' @export
 mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
                           pre_score_method = "anova", pre_score_top_percent = 1,
@@ -54,7 +56,10 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
       metrics = final_model$metrics,
       features_count = length(final_model$features),
       n_groups = length(top_groups),
-      group_accuracies = group_scores
+      group_accuracies = group_scores,
+      # Per-fold detail for results export (full G-S-M parity):
+      pre_scores = attr(top_groups, "scores"),   # sorted Fisher/ANOVA scores (all groups)
+      importance = final_model$importance         # per-gene RF importance (NULL for SVM/KNN)
     )
   }, error = function(e) {
     list(fold = fold, status = "error", error_message = conditionMessage(e))
