@@ -27,6 +27,8 @@ A list with:
 \item{actual}{Factor of actual labels for test samples.}
 \item{features}{Character vector of gene names used.}
 \item{n_groups}{Number of groups used.}
+\item{importance}{Named numeric of per-gene RandomForest importance
+(MeanDecreaseGini) for \code{method = "rf"}; \code{NULL} for SVM/KNN.}
 }
 }
 \description{

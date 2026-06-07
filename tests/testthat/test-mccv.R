@@ -64,3 +64,56 @@ test_that("run_mccv works in parallel", {
   expect_equal(mccv_par$folds[[1]]$status, "success")
   expect_equal(mccv_par$folds[[2]]$status, "success")
 })
+
+
+test_that("mccv_run_fold builds an accumulative top-k curve ranked by train score", {
+  skip_if_not_installed("randomForest")
+  expr_data <- read_expression(test_data_path("test_expression.csv"))
+  groups <- read_groups(test_data_path("test_groups.csv"))
+  ds <- gsm_dataset(expr_data$expr, expr_data$labels, groups,
+                    min_group_size = 2, max_group_size = 500)
+
+  f <- mccv_run_fold(ds, fold = 1, train_ratio = 0.7, pre_score_method = "none",
+                     score_method = "rf", model_method = "rf", top_n = 4, seed = 1)
+  expect_equal(f$status, "success")
+  expect_s3_class(f$accumulative, "data.frame")
+  expect_true(nrow(f$accumulative) >= 1 && nrow(f$accumulative) <= 4)
+  expect_false(is.unsorted(f$accumulative$k))              # k increasing (may skip)
+  expect_true(all(c("Accuracy", "Sensitivity", "F_measure", "Cohens_kappa") %in%
+                    names(f$accumulative)))
+  expect_false(is.unsorted(f$accumulative$n_features))     # genes accumulate
+  # best_k = the k (group level) with the highest F1.
+  expect_equal(f$best_k, f$accumulative$k[which.max(f$accumulative$F_measure)])
+  # ranked_groups follows the train-only group scores (descending).
+  expect_equal(f$ranked_groups, names(sort(f$group_accuracies, decreasing = TRUE)))
+  expect_true("GroupA_signal" %in% f$ranked_groups[1:2])   # signal group ranks top
+  # Gene shaving kept only a subset of genes.
+  expect_true(f$n_shaved_genes <= nrow(ds$expr))
+})
+
+test_that("shave_genes keeps differentially-expressed genes (Welch + BH)", {
+  ed <- read_expression(test_data_path("test_expression.csv"))
+  ds <- gsm_dataset(ed$expr, ed$labels,
+                    read_groups(test_data_path("test_groups.csv")),
+                    min_group_size = 2, max_group_size = 500)
+  sp <- split_train_test(ds$labels, 0.7, seed = 44)
+  keep <- shave_genes(ds$expr, ds$labels, sp$train, alpha = 0.05)
+  expect_true(length(keep) < nrow(ds$expr))            # something was shaved off
+  # The toy "signal" genes (GENE1-10) should dominate the survivors.
+  expect_true(mean(grepl("^GENE([1-9]|10)$", keep)) > 0.5)
+})
+
+
+test_that("run_mccv aggregates accumulative folds for export (res1 per k)", {
+  skip_if_not_installed("randomForest")
+  expr_data <- read_expression(test_data_path("test_expression.csv"))
+  groups <- read_groups(test_data_path("test_groups.csv"))
+  ds <- gsm_dataset(expr_data$expr, expr_data$labels, groups,
+                    min_group_size = 2, max_group_size = 500)
+
+  res <- run_mccv(ds, n_iterations = 3, top_n = 3, cores = 1, seed = 44,
+                  pre_score_top_percent = 100, shave = FALSE)
+  acc <- gsm_export_tables(res, ds)$AccumulativeSummary
+  expect_true(nrow(acc) >= 1 && nrow(acc) <= 3)   # one row per distinct-feature k
+  expect_true(all(c("Mean_Accuracy", "SD_Accuracy", "Mean_Features") %in% names(acc)))
+})

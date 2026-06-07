@@ -4,7 +4,7 @@
 \alias{pre_score_none}
 \title{Pass-through pre-scoring (no filtering)}
 \usage{
-pre_score_none(dataset, train_idx, ...)
+pre_score_none(dataset, train_idx, progress = NULL, ...)
 }
 \arguments{
 \item{dataset}{A \code{gsm_dataset} object.}

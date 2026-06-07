@@ -34,5 +34,11 @@ run_app <- function(...) {
          "Make sure gsmR is installed or run from the package root.")
   }
 
+  # Capture the launch directory before runApp() changes the working directory,
+  # so the app can locate repo-level example_input_files/ and example_grouping_files/.
+  old_opt <- getOption("gsmR.launch_dir")
+  options(gsmR.launch_dir = getwd())
+  on.exit(options(gsmR.launch_dir = old_opt), add = TRUE)
+
   shiny::runApp(app_dir, ...)
 }

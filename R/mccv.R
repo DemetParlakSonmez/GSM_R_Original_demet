@@ -4,6 +4,99 @@
 #' @name mccv
 NULL
 
+#' Run a single MCCV fold
+#'
+#' Executes one Monte Carlo CV iteration: stratified split, pre-scoring,
+#' per-group scoring, and final joint model. Exported so callers (e.g. the
+#' Shiny app) can run folds incrementally and stream live per-fold results.
+#'
+#' @param dataset A `gsm_dataset` object.
+#' @param fold Integer fold index (also offsets the seed: `seed + fold`).
+#' @param train_ratio,pre_score_method,pre_score_top_percent,score_method,model_method,score_args,model_args,seed
+#'   See [run_mccv()].
+#' @return A list with `fold`, `status` ("success"/"error"), and on success
+#'   `metrics`, `features_count`, `n_groups`, `group_accuracies`, `pre_scores`
+#'   (sorted pre-scoring scores for all groups), and `importance` (per-gene RF
+#'   importance, `NULL` for SVM/KNN).
+#' @export
+mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
+                          pre_score_method = "anova", pre_score_top_percent = 1,
+                          score_method = "rf", model_method = "rf",
+                          score_args = list(), model_args = list(),
+                          top_n = 10, shave = TRUE, fdr_alpha = 0.05, seed = 42) {
+  fold_seed <- seed + fold
+  tryCatch({
+    split <- split_train_test(dataset$labels, ratio = train_ratio, seed = fold_seed)
+
+    # Phase I — training-only gene shaving (Welch t-test + BH FDR), then group.
+    keep_genes <- if (isTRUE(shave))
+      shave_genes(dataset$expr, dataset$labels, split$train, alpha = fdr_alpha)
+    else rownames(dataset$expr)
+
+    # Candidate groups: optional ANOVA group pre-filter, then shave their genes.
+    candidates <- pre_score_groups(dataset, split$train,
+                                   method = pre_score_method,
+                                   top_percent = pre_score_top_percent)
+    pre_sc <- attr(candidates, "scores")
+    candidates <- shave_groups(candidates, keep_genes)
+    if (length(candidates) == 0)
+      stop("No groups survived gene shaving (FDR ", fdr_alpha, ").")
+
+    # Phase II — SCORE each candidate (mean F1, k-fold CV, TRAIN only) -> rank.
+    scores <- vapply(names(candidates), function(name) {
+      do.call(score_group_train, c(
+        list(expr = dataset$expr, labels = dataset$labels,
+             genes = candidates[[name]], train_idx = split$train,
+             method = score_method),
+        score_args))
+    }, numeric(1))
+    ranked <- names(sort(scores, decreasing = TRUE))
+
+    # Phase III — ACCUMULATIVE MODELING top-1..K; skip k that add no new genes.
+    K <- min(top_n, length(ranked))
+    acc_rows <- list(); best_model <- NULL; prev_features <- 0L
+    for (k in seq_len(K)) {
+      sub <- candidates[ranked[seq_len(k)]]
+      n_feat <- length(unique(unlist(sub)))
+      if (n_feat == prev_features) next            # expand: no new features at this k
+      prev_features <- n_feat
+      m <- do.call(build_model, c(
+        list(expr = dataset$expr, labels = dataset$labels, top_groups = sub,
+             train_idx = split$train, method = model_method),
+        model_args))
+      acc_rows[[length(acc_rows) + 1L]] <- data.frame(
+        k = k, group_added = ranked[k], n_features = length(m$features),
+        Accuracy = m$metrics$Accuracy, Sensitivity = m$metrics$Sensitivity,
+        Specificity = m$metrics$Specificity, Precision = m$metrics$Precision,
+        F_measure = m$metrics$F_measure, Cohens_kappa = m$metrics$Cohens_kappa,
+        stringsAsFactors = FALSE)
+      m$.k <- k
+      # Best model = highest F1 (the G-S-M selection metric).
+      if (is.null(best_model) || m$metrics$F_measure > best_model$metrics$F_measure)
+        best_model <- m
+    }
+    accumulative <- do.call(rbind, acc_rows)
+    best_k <- best_model$.k
+
+    list(
+      fold = fold,
+      status = "success",
+      metrics = best_model$metrics,               # performance at the best k (by F1)
+      best_k = best_k,
+      features_count = length(best_model$features),
+      n_groups = best_k,
+      n_shaved_genes = length(keep_genes),         # genes surviving Welch+BH
+      accumulative = accumulative,                 # top-1..K performance curve
+      ranked_groups = ranked,
+      group_accuracies = scores,                   # train-only mean-F1 ranking scores
+      pre_scores = pre_sc,                         # sorted ANOVA scores (all groups)
+      importance = best_model$importance           # per-gene RF importance @ best k
+    )
+  }, error = function(e) {
+    list(fold = fold, status = "error", error_message = conditionMessage(e))
+  })
+}
+
 #' Run Monte Carlo Cross-Validation (MCCV) in parallel
 #'
 #' Runs multiple iterations of stratified train/test splitting, statistical
@@ -19,6 +112,9 @@ NULL
 #' @param model_method Classifier method for final model. Default `"rf"`.
 #' @param score_args Named list of additional arguments passed to the scoring classifier. Default `list()`.
 #' @param model_args Named list of additional arguments passed to the final model classifier. Default `list()`.
+#' @param top_n Integer. Number of accumulative top-k levels to evaluate per fold
+#'   (the model is built on top-1, top-1..2, ..., top-1..`top_n` ranked groups).
+#'   Default `10`.
 #' @param cores Integer. Number of CPU cores to use. Default is all minus one.
 #' @param seed Integer. Base random seed for reproducibility. Default `42`.
 #' @param ... Additional arguments passed to model/scoring functions.
@@ -28,7 +124,8 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
                      pre_score_method = "anova", pre_score_top_percent = 1,
                      score_method = "rf", model_method = "rf",
                      score_args = list(), model_args = list(),
-                     cores = NULL, seed = 42, ...) {
+                     top_n = 10, shave = TRUE, fdr_alpha = 0.05,
+                     cores = NULL, seed = 44, ...) {
   stopifnot(inherits(dataset, "gsm_dataset"))
   stopifnot(is.numeric(n_iterations) && n_iterations > 0)
   stopifnot(is.numeric(train_ratio) && train_ratio > 0 && train_ratio < 1)
@@ -41,53 +138,16 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
   
   message(sprintf("Starting MCCV with %d iterations on %d cores...", n_iterations, cores))
 
-  # Define the single fold runner
+  # Single fold runner delegates to the exported helper (shared with the
+  # Shiny app's live/streaming MCCV view).
   run_fold <- function(i) {
-    fold_seed <- seed + i
-    
-    tryCatch({
-      # Run split
-      split <- split_train_test(dataset$labels, ratio = train_ratio, seed = fold_seed)
-      
-      # Pre-scoring
-      top_groups <- pre_score_groups(dataset, split$train, 
-                                     method = pre_score_method, 
-                                     top_percent = pre_score_top_percent)
-      
-      # Score individual groups
-      group_scores <- list()
-      for (name in names(top_groups)) {
-        genes <- top_groups[[name]]
-        
-        score_args_combined <- c(
-          list(expr = dataset$expr, labels = dataset$labels, genes = genes, train_idx = split$train, method = score_method),
-          score_args
-        )
-        score <- do.call(score_group, score_args_combined)
-        group_scores[[name]] <- score$accuracy
-      }
-      
-      # Build final model
-      model_args_combined <- c(
-        list(expr = dataset$expr, labels = dataset$labels, top_groups = top_groups, train_idx = split$train, method = model_method),
-        model_args
-      )
-      final_model <- do.call(build_model, model_args_combined)
-      
-      list(
-        fold = i,
-        status = "success",
-        metrics = final_model$metrics,
-        features_count = length(final_model$features),
-        group_accuracies = group_scores
-      )
-    }, error = function(e) {
-      list(
-        fold = i,
-        status = "error",
-        error_message = e$message
-      )
-    })
+    mccv_run_fold(dataset, i, train_ratio = train_ratio,
+                  pre_score_method = pre_score_method,
+                  pre_score_top_percent = pre_score_top_percent,
+                  score_method = score_method, model_method = model_method,
+                  score_args = score_args, model_args = model_args,
+                  top_n = top_n, shave = shave, fdr_alpha = fdr_alpha,
+                  seed = seed)
   }
 
   # Run in parallel or sequentially based on cores and OS

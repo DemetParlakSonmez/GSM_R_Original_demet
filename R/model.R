@@ -22,6 +22,8 @@ NULL
 #'     \item{actual}{Factor of actual labels for test samples.}
 #'     \item{features}{Character vector of gene names used.}
 #'     \item{n_groups}{Number of groups used.}
+#'     \item{importance}{Named numeric of per-gene RandomForest importance
+#'       (MeanDecreaseGini) for `method = "rf"`; `NULL` for SVM/KNN.}
 #'   }
 #' @export
 build_model <- function(expr, labels, top_groups, train_idx,
@@ -72,7 +74,8 @@ build_model_rf <- function(expr, labels, top_groups, train_idx, ...) {
       predictions = factor(rep(NA, length(test_idx)), levels = levels(labels)),
       actual      = labels[test_idx],
       features    = character(0),
-      n_groups    = length(top_groups)
+      n_groups    = length(top_groups),
+      importance  = NULL
     ))
   }
 
@@ -99,12 +102,19 @@ build_model_rf <- function(expr, labels, top_groups, train_idx, ...) {
   # Metrics
   metrics <- calc_all_metrics(test_labels, predictions, positive_class)
 
+  # Per-gene Random Forest importance (MeanDecreaseGini), named by gene.
+  importance <- tryCatch({
+    imp <- model$importance
+    stats::setNames(as.numeric(imp[, ncol(imp)]), rownames(imp))
+  }, error = function(e) NULL)
+
   list(
     metrics     = metrics,
     predictions = predictions,
     actual      = test_labels,
     features    = all_genes,
-    n_groups    = length(top_groups)
+    n_groups    = length(top_groups),
+    importance  = importance
   )
 }
 
@@ -141,7 +151,8 @@ build_model_svm <- function(expr, labels, top_groups, train_idx, ...) {
       predictions = factor(rep(NA, length(test_idx)), levels = levels(labels)),
       actual      = labels[test_idx],
       features    = character(0),
-      n_groups    = length(top_groups)
+      n_groups    = length(top_groups),
+      importance  = NULL
     ))
   }
 
@@ -173,7 +184,8 @@ build_model_svm <- function(expr, labels, top_groups, train_idx, ...) {
     predictions = predictions,
     actual      = test_labels,
     features    = all_genes,
-    n_groups    = length(top_groups)
+    n_groups    = length(top_groups),
+    importance  = NULL
   )
 }
 
@@ -209,7 +221,8 @@ build_model_knn <- function(expr, labels, top_groups, train_idx, ...) {
       predictions = factor(rep(NA, length(test_idx)), levels = levels(labels)),
       actual      = labels[test_idx],
       features    = character(0),
-      n_groups    = length(top_groups)
+      n_groups    = length(top_groups),
+      importance  = NULL
     ))
   }
 
@@ -239,7 +252,8 @@ build_model_knn <- function(expr, labels, top_groups, train_idx, ...) {
     predictions = predictions,
     actual      = test_labels,
     features    = all_genes,
-    n_groups    = length(top_groups)
+    n_groups    = length(top_groups),
+    importance  = NULL
   )
 }
 

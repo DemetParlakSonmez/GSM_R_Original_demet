@@ -1,0 +1,2 @@
+example_input_files/** filter=lfs diff=lfs merge=lfs -text
+example_grouping_files/** filter=lfs diff=lfs merge=lfs -text

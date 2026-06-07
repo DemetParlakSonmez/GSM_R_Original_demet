@@ -45,6 +45,87 @@ score_group <- function(expr, labels, genes, train_idx,
 }
 
 
+#' Score a single group using TRAINING data only (mean F1 via k-fold CV)
+#'
+#' Computes a ranking score for a group as the mean F1 across stratified
+#' k-fold cross-validation on the training partition only (no test leakage),
+#' matching the G-S-M Scoring phase. This is the criterion used to rank groups
+#' for the accumulative modeling step.
+#'
+#' @param expr Numeric matrix (genes x samples).
+#' @param labels Factor of class labels.
+#' @param genes Character vector of gene names for this group.
+#' @param train_idx Integer vector of training sample indices.
+#' @param method Classifier method (`"rf"`, `"svm"`, `"knn"`).
+#' @param cv Number of stratified CV folds (default 3, per the paper).
+#' @param ... Additional arguments passed to the classifier.
+#' @return A single numeric mean-F1 score (NA if no usable genes).
+#' @export
+score_group_train <- function(expr, labels, genes, train_idx,
+                              method = "rf", cv = 3, ...) {
+  stopifnot(is.matrix(expr) && is.numeric(expr))
+  stopifnot(is.factor(labels))
+  genes <- intersect(genes, rownames(expr))
+  if (length(genes) == 0) return(NA_real_)
+
+  x <- t(expr[genes, train_idx, drop = FALSE])    # samples x genes
+  y <- droplevels(labels[train_idx])
+  if (nlevels(y) < 2) return(NA_real_)
+  pos <- if ("pos" %in% levels(y)) "pos" else levels(y)[1]
+
+  folds <- stratified_folds(y, k = cv)
+  f1s <- vapply(seq_along(folds), function(i) {
+    va <- folds[[i]]; tr <- setdiff(seq_along(y), va)
+    if (length(unique(y[tr])) < 2 || length(va) == 0) return(NA_real_)
+    pred <- .cv_predict(method, x[tr, , drop = FALSE], y[tr],
+                        x[va, , drop = FALSE], ...)
+    if (is.null(pred)) return(NA_real_)
+    calc_f_measure(y[va], pred, positive_class = pos)
+  }, numeric(1))
+  mean(f1s, na.rm = TRUE)
+}
+
+# Train on (x_tr, y_tr), predict x_va, for one CV fold. Returns a factor or NULL.
+.cv_predict <- function(method, x_tr, y_tr, x_va, ...) {
+  if (method == "rf") {
+    if (!requireNamespace("randomForest", quietly = TRUE))
+      stop("Package 'randomForest' is required for method 'rf'.")
+    fit <- randomForest::randomForest(x = as.data.frame(x_tr), y = y_tr, ...)
+    stats::predict(fit, newdata = as.data.frame(x_va))
+  } else if (method == "svm") {
+    if (!requireNamespace("e1071", quietly = TRUE))
+      stop("Package 'e1071' is required for method 'svm'.")
+    fit <- e1071::svm(x = as.data.frame(x_tr), y = y_tr, ...)
+    stats::predict(fit, newdata = as.data.frame(x_va))
+  } else if (method == "knn") {
+    if (!requireNamespace("class", quietly = TRUE))
+      stop("Package 'class' is required for method 'knn'.")
+    kk <- list(...)$k %||% 3
+    class::knn(train = x_tr, test = x_va, cl = y_tr, k = kk)
+  } else {
+    stop("Unknown scoring method: '", method, "'.")
+  }
+}
+
+#' Stratified k-fold assignment (returns a list of validation-index vectors)
+#' @param y Factor of labels.
+#' @param k Number of folds.
+#' @return List of length k; each element holds the row indices of that fold.
+#' @export
+stratified_folds <- function(y, k = 3) {
+  k <- max(2, min(k, min(table(y))))              # k <= smallest class size
+  fold_id <- integer(length(y))
+  for (lev in levels(y)) {
+    idx <- which(y == lev)
+    fold_id[idx] <- (sample(seq_along(idx)) - 1) %% k + 1
+  }
+  split(seq_along(y), fold_id)
+}
+
+# Local null-coalesce (base R %||% only from 4.4.0).
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+
 #' Score a group using Random Forest
 #'
 #' Trains a Random Forest classifier on the group's genes from training
