@@ -14,6 +14,7 @@ run_mccv(
   model_method = "rf",
   score_args = list(),
   model_args = list(),
+  top_n = 10,
   cores = NULL,
   seed = 42,
   ...
@@ -37,6 +38,10 @@ run_mccv(
 \item{score_args}{Named list of additional arguments passed to the scoring classifier. Default \code{list()}.}
 
 \item{model_args}{Named list of additional arguments passed to the final model classifier. Default \code{list()}.}
+
+\item{top_n}{Integer. Number of accumulative top-k levels to evaluate per fold
+(the model is built on top-1, top-1..2, ..., top-1..\code{top_n} ranked groups).
+Default \code{10}.}
 
 \item{cores}{Integer. Number of CPU cores to use. Default is all minus one.}
 

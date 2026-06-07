@@ -22,44 +22,62 @@ NULL
 mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
                           pre_score_method = "anova", pre_score_top_percent = 1,
                           score_method = "rf", model_method = "rf",
-                          score_args = list(), model_args = list(), seed = 42) {
+                          score_args = list(), model_args = list(),
+                          top_n = 10, seed = 42) {
   fold_seed <- seed + fold
   tryCatch({
     split <- split_train_test(dataset$labels, ratio = train_ratio, seed = fold_seed)
 
-    top_groups <- pre_score_groups(dataset, split$train,
+    # Candidate groups (optional ANOVA pre-filter; "all groups" => top 100%).
+    candidates <- pre_score_groups(dataset, split$train,
                                    method = pre_score_method,
                                    top_percent = pre_score_top_percent)
 
-    group_scores <- list()
-    for (name in names(top_groups)) {
-      score_args_combined <- c(
+    # 1) SCORE each candidate group on TRAINING ONLY (no test leakage) -> rank.
+    scores <- vapply(names(candidates), function(name) {
+      do.call(score_group_train, c(
         list(expr = dataset$expr, labels = dataset$labels,
-             genes = top_groups[[name]], train_idx = split$train,
+             genes = candidates[[name]], train_idx = split$train,
              method = score_method),
-        score_args
-      )
-      score <- do.call(score_group, score_args_combined)
-      group_scores[[name]] <- score$accuracy
-    }
+        score_args))
+    }, numeric(1))
+    ranked <- names(sort(scores, decreasing = TRUE))
 
-    model_args_combined <- c(
-      list(expr = dataset$expr, labels = dataset$labels, top_groups = top_groups,
-           train_idx = split$train, method = model_method),
-      model_args
-    )
-    final_model <- do.call(build_model, model_args_combined)
+    # 2) ACCUMULATIVE MODELING: top-1, top-1..2, ..., top-1..K on the test set.
+    K <- min(top_n, length(ranked))
+    acc_rows <- vector("list", K)
+    best_model <- NULL
+    for (k in seq_len(K)) {
+      sub <- candidates[ranked[seq_len(k)]]
+      m <- do.call(build_model, c(
+        list(expr = dataset$expr, labels = dataset$labels, top_groups = sub,
+             train_idx = split$train, method = model_method),
+        model_args))
+      acc_rows[[k]] <- data.frame(
+        k = k, group_added = ranked[k], n_features = length(m$features),
+        Accuracy = m$metrics$Accuracy, Sensitivity = m$metrics$Sensitivity,
+        Specificity = m$metrics$Specificity, Precision = m$metrics$Precision,
+        F_measure = m$metrics$F_measure, Cohens_kappa = m$metrics$Cohens_kappa,
+        stringsAsFactors = FALSE)
+      m$.k <- k
+      if (is.null(best_model) || m$metrics$Accuracy > best_model$metrics$Accuracy)
+        best_model <- m
+    }
+    accumulative <- do.call(rbind, acc_rows)
+    best_k <- best_model$.k
 
     list(
       fold = fold,
       status = "success",
-      metrics = final_model$metrics,
-      features_count = length(final_model$features),
-      n_groups = length(top_groups),
-      group_accuracies = group_scores,
-      # Per-fold detail for results export (full G-S-M parity):
-      pre_scores = attr(top_groups, "scores"),   # sorted Fisher/ANOVA scores (all groups)
-      importance = final_model$importance         # per-gene RF importance (NULL for SVM/KNN)
+      metrics = best_model$metrics,               # performance at the best k
+      best_k = best_k,
+      features_count = length(best_model$features),
+      n_groups = best_k,
+      accumulative = accumulative,                 # top-1..K performance curve
+      ranked_groups = ranked,
+      group_accuracies = scores,                   # train-only ranking scores
+      pre_scores = attr(candidates, "scores"),     # sorted ANOVA scores (all groups)
+      importance = best_model$importance           # per-gene RF importance @ best k
     )
   }, error = function(e) {
     list(fold = fold, status = "error", error_message = conditionMessage(e))
@@ -81,6 +99,9 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
 #' @param model_method Classifier method for final model. Default `"rf"`.
 #' @param score_args Named list of additional arguments passed to the scoring classifier. Default `list()`.
 #' @param model_args Named list of additional arguments passed to the final model classifier. Default `list()`.
+#' @param top_n Integer. Number of accumulative top-k levels to evaluate per fold
+#'   (the model is built on top-1, top-1..2, ..., top-1..`top_n` ranked groups).
+#'   Default `10`.
 #' @param cores Integer. Number of CPU cores to use. Default is all minus one.
 #' @param seed Integer. Base random seed for reproducibility. Default `42`.
 #' @param ... Additional arguments passed to model/scoring functions.
@@ -90,7 +111,7 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
                      pre_score_method = "anova", pre_score_top_percent = 1,
                      score_method = "rf", model_method = "rf",
                      score_args = list(), model_args = list(),
-                     cores = NULL, seed = 42, ...) {
+                     top_n = 10, cores = NULL, seed = 42, ...) {
   stopifnot(inherits(dataset, "gsm_dataset"))
   stopifnot(is.numeric(n_iterations) && n_iterations > 0)
   stopifnot(is.numeric(train_ratio) && train_ratio > 0 && train_ratio < 1)
@@ -110,7 +131,8 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
                   pre_score_method = pre_score_method,
                   pre_score_top_percent = pre_score_top_percent,
                   score_method = score_method, model_method = model_method,
-                  score_args = score_args, model_args = model_args, seed = seed)
+                  score_args = score_args, model_args = model_args,
+                  top_n = top_n, seed = seed)
   }
 
   # Run in parallel or sequentially based on cores and OS

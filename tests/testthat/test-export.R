@@ -45,9 +45,13 @@ test_that("gsm_export_tables returns the expected MCCV table set", {
   )
   mk_metrics <- function(a) list(Accuracy = a, Sensitivity = a, Specificity = a,
                                  Precision = a, F_measure = a, Cohens_kappa = a)
+  acc1 <- data.frame(k = 1:2, group_added = c("GroupA", "GroupB"),
+                     n_features = c(2L, 3L), Accuracy = c(0.8, 0.9),
+                     Sensitivity = 0.9, Specificity = 0.9, Precision = 0.9,
+                     F_measure = 0.9, Cohens_kappa = 0.8, stringsAsFactors = FALSE)
   folds <- list(
-    list(fold = 1, status = "success", metrics = mk_metrics(0.9),
-         features_count = 3L, n_groups = 2L,
+    list(fold = 1, status = "success", metrics = mk_metrics(0.9), best_k = 2L,
+         features_count = 3L, n_groups = 2L, accumulative = acc1,
          group_accuracies = c(GroupA = 0.9, GroupB = 0.7),
          pre_scores = c(GroupA = 10, GroupB = 5), importance = c(g1 = 2)),
     list(fold = 2, status = "error", error_message = "boom")
@@ -56,12 +60,16 @@ test_that("gsm_export_tables returns the expected MCCV table set", {
                  metrics_summary = data.frame(Mean = rep(0.9, 6), SD = rep(0, 6),
                                               row.names = names(mk_metrics(0))))
   tbls <- gsm_export_tables(result, ds)
-  expect_true(all(c("RunSummary", "MetricSummary", "IterationMetrics",
-                    "IterationGroupScores", "GroupRanking", "GroupFeatureAssoc",
-                    "PreScoreSignificance", "RankedFeatures") %in% names(tbls)))
-  # Error fold is retained in IterationMetrics
-  expect_equal(nrow(tbls$IterationMetrics), 2L)
-  expect_true("error" %in% tbls$IterationMetrics$Status)
+  expect_true(all(c("RunSummary", "AccumulativeSummary", "IterationAccumulative",
+                    "BestKPerIteration", "MetricSummary", "IterationGroupScores",
+                    "GroupRanking", "GroupFeatureAssoc", "PreScoreSignificance",
+                    "RankedFeatures") %in% names(tbls)))
+  # res1 has one row per k; res2 has iteration x k rows
+  expect_equal(nrow(tbls$AccumulativeSummary), 2L)
+  expect_equal(nrow(tbls$IterationAccumulative), 2L)
+  # Error fold is retained in BestKPerIteration
+  expect_equal(nrow(tbls$BestKPerIteration), 2L)
+  expect_true("error" %in% tbls$BestKPerIteration$Status)
 
   # CSV bundle writes a non-empty zip
   zf <- tempfile(fileext = ".zip")

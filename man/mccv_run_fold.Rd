@@ -14,6 +14,7 @@ mccv_run_fold(
   model_method = "rf",
   score_args = list(),
   model_args = list(),
+  top_n = 10,
   seed = 42
 )
 }

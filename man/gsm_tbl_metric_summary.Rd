@@ -2,13 +2,13 @@
 % Please edit documentation in R/export.R
 \name{gsm_tbl_metric_summary}
 \alias{gsm_tbl_metric_summary}
-\title{Aggregate metric summary (mirrors \code{res1}). Uses \code{result$metrics_summary}
-when present, otherwise computes from folds.}
+\title{Aggregate best-k metric summary. Uses \code{result$metrics_summary} when present,
+otherwise computes from per-fold best-k metrics.}
 \usage{
 gsm_tbl_metric_summary(result)
 }
 \description{
-Aggregate metric summary (mirrors \code{res1}). Uses \code{result$metrics_summary}
-when present, otherwise computes from folds.
+Aggregate best-k metric summary. Uses \code{result$metrics_summary} when present,
+otherwise computes from per-fold best-k metrics.
 }
 \keyword{internal}

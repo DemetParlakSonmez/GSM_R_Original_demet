@@ -421,11 +421,11 @@ ui <- page_navbar(
                      choices = c("Top pre-scored groups (recommended)" = "selected",
                                  "All groups (skip pre-score filter)" = "all"),
                      selected = "selected"),
-        # "Score top N groups" only limits single-fold + selected scope.
-        conditionalPanel(
-          condition = "!input.run_mccv_mode && input.score_scope == 'selected'",
-          numericInput("n_top_groups", "Score top N groups", value = 10, min = 1)
-        ),
+        # Accumulative depth K: build models on top-1, top-1..2, ..., top-1..K
+        # ranked groups and report performance at each level (both modes).
+        numericInput("n_top_groups",
+                     "Accumulative depth (top-K groups to model)",
+                     value = 10, min = 1),
         numericInput("score_seed", "Random seed", value = 42),
 
         tags$hr(),
@@ -500,6 +500,21 @@ ui <- page_navbar(
                      tags$b("Save to workspace folder"), " (writes files into the project), ",
                      "or open the app in a real browser tab."),
           uiOutput("save_disk_path")
+        ),
+
+        # Accumulative performance curve (top-1..K) — the hallmark G-S-M plot.
+        card(
+          card_header("Accumulative performance: metric vs. number of top groups (k)"),
+          layout_sidebar(
+            sidebar = sidebar(
+              width = 220, position = "right",
+              selectInput("acc_metric", "Metric",
+                          choices = c("Accuracy", "Sensitivity", "Specificity",
+                                      "Precision", "F_measure", "Cohens_kappa"),
+                          selected = "Accuracy")
+            ),
+            plotOutput("plot_accumulative", height = "320px")
+          )
         ),
 
         # Display Single Fold Mode Results
@@ -1267,85 +1282,82 @@ server <- function(input, output, session) {
           rv$train_idx <- split$train
         }
 
-        # Scope: pre-selected top groups (trim to top N) OR all groups.
+        # Candidate groups: all groups, or the pre-scored top set (auto if needed).
         scope_all <- identical(input$score_scope, "all")
         auto_prescored <- FALSE
         if (scope_all) {
-          groups_to_score <- rv$dataset$groups          # every group, no top-N cap
+          candidates <- rv$dataset$groups
         } else {
-          gs <- rv$prescore_groups
-          if (is.null(gs)) {                             # no Pre-Score run → do it now
-            gs <- pre_score_groups(rv$dataset, rv$train_idx,
-                                   method = input$prescore_method,
-                                   top_percent = input$top_percent)
+          candidates <- rv$prescore_groups
+          if (is.null(candidates)) {
+            candidates <- pre_score_groups(rv$dataset, rv$train_idx,
+                                           method = input$prescore_method,
+                                           top_percent = input$top_percent)
             auto_prescored <- TRUE
           }
-          keep <- min(input$n_top_groups, length(gs))
-          groups_to_score <- gs[seq_len(keep)]           # ...trimmed to top N
         }
-        n <- length(groups_to_score)
-        scope_msg <- if (scope_all)
-          sprintf("ALL %d groups", n)
-        else
-          sprintf("top %d groups%s", n,
-                  if (auto_prescored) " (auto pre-scored)" else "")
+        K <- min(input$n_top_groups, length(candidates))
 
         results <- list()
-        withProgress(message = paste0("Scoring ", scope_msg, "…"), value = 0, {
-          for (i in seq_along(groups_to_score)) {
-            gname <- names(groups_to_score)[i]
-            setProgress(i / n, detail = paste0(gname, " (", i, "/", n, ")"))
-
-            set.seed(input$score_seed)
-            score_args_combined <- c(
-              list(
-                expr      = rv$dataset$expr,
-                labels    = rv$dataset$labels,
-                genes     = groups_to_score[[i]],
-                train_idx = rv$train_idx,
-                method    = input$score_method
-              ),
-              score_args
-            )
-            res <- do.call(score_group, score_args_combined)
-            results[[gname]] <- res
+        final_model <- NULL; best_k <- NA_integer_
+        withProgress(message = "Scoring (train-only) + accumulative modeling...", value = 0, {
+          # 1) Score each candidate group on TRAINING only -> rank.
+          scores <- numeric(length(candidates)); names(scores) <- names(candidates)
+          for (i in seq_along(candidates)) {
+            gname <- names(candidates)[i]
+            setProgress(0.5 * i / length(candidates),
+                        detail = sprintf("Scoring %s (%d/%d)", gname, i, length(candidates)))
+            scores[i] <- do.call(score_group_train, c(
+              list(expr = rv$dataset$expr, labels = rv$dataset$labels,
+                   genes = candidates[[gname]], train_idx = rv$train_idx,
+                   method = input$score_method), score_args))
+            results[[gname]] <- list(accuracy = scores[i])
           }
-          
-          setProgress(0.9, detail = "Building final joint model...")
-          
-          # Build final joint model on combined top features
-          m_method <- input$score_method
-          m_args <- score_args
-          
-          model_args_combined <- c(
-            list(
-              expr       = rv$dataset$expr,
-              labels     = rv$dataset$labels,
-              top_groups = groups_to_score,
-              train_idx  = rv$train_idx,
-              method     = m_method
-            ),
-            m_args
-          )
-          final_model <- do.call(build_model, model_args_combined)
-          
-          rv$final_model <- final_model
+          ranked <- names(sort(scores, decreasing = TRUE))
+
+          # 2) Accumulative top-1..K models, evaluated on the held-out test split.
+          acc_rows <- vector("list", K); best_model <- NULL
+          for (k in seq_len(K)) {
+            setProgress(0.5 + 0.5 * k / K,
+                        detail = sprintf("Modeling top-%d / %d groups", k, K))
+            sub <- candidates[ranked[seq_len(k)]]
+            m <- do.call(build_model, c(
+              list(expr = rv$dataset$expr, labels = rv$dataset$labels,
+                   top_groups = sub, train_idx = rv$train_idx,
+                   method = input$score_method), score_args))
+            acc_rows[[k]] <- data.frame(
+              k = k, group_added = ranked[k], n_features = length(m$features),
+              Accuracy = m$metrics$Accuracy, Sensitivity = m$metrics$Sensitivity,
+              Specificity = m$metrics$Specificity, Precision = m$metrics$Precision,
+              F_measure = m$metrics$F_measure, Cohens_kappa = m$metrics$Cohens_kappa,
+              stringsAsFactors = FALSE)
+            m$.k <- k
+            if (is.null(best_model) || m$metrics$Accuracy > best_model$metrics$Accuracy)
+              best_model <- m
+          }
+          final_model      <- best_model
+          best_k           <- best_model$.k
+          rv$accumulative  <- do.call(rbind, acc_rows)
+          rv$final_model   <- final_model
           rv$score_results <- results
           rv$scored <- TRUE
-          setProgress(1.0, detail = "Done!")
+          setProgress(1, detail = "Done!")
         })
 
+        n <- length(candidates)
         rv$score_summary <- list(
           mode = "single",
           dataset_name = rv$dataset_name %||% "dataset",
+          modeling = sprintf("accumulative top-1..%d (best k = %d)", K, best_k),
+          best_k = best_k,
           scope = if (scope_all) "All groups (pre-score filter skipped)"
                   else if (auto_prescored) "Top pre-scored groups (auto, on the fly)"
                   else "Top pre-scored groups",
           classifier = classifier_label(input$score_method),
           params = format_params(score_args),
-          n_groups_scored = n,
-          n_groups_available = if (scope_all) rv$dataset$params$n_groups
-                               else length(rv$prescore_groups %||% groups_to_score),
+          ranking = "group classifier score (train-only)",
+          n_candidates = n,
+          n_groups_scored = K,
           n_features = length(final_model$features),
           prescore_method = if (scope_all) "skipped" else input$prescore_method,
           prescore_top_percent = input$top_percent,
@@ -1354,8 +1366,9 @@ server <- function(input, output, session) {
                             rv$dataset$params$n_samples, rv$dataset$params$n_genes)
         )
         rv$time_score <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
-        showNotification(paste0("\u2705 Scored ", n, " groups and built final model in ",
-                                format_duration(rv$time_score), "!"), type = "message")
+        showNotification(sprintf("✅ Accumulative top-1..%d done (best k = %d) in %s!",
+                                 K, best_k, format_duration(rv$time_score)),
+                         type = "message")
       } else {
         # ── PARALLEL MULTI-FOLD MCCV ────────────────────────────────────────
         m_method <- if (input$model_method == "same") input$score_method else input$model_method
@@ -1380,7 +1393,7 @@ server <- function(input, output, session) {
           pre_score_top_percent = fold_top_pct,
           score_method = input$score_method, model_method = m_method,
           score_args = score_args, model_args = model_args,
-          seed = input$score_seed
+          top_n = input$n_top_groups, seed = input$score_seed
         )
         mc$n      <- input$mccv_iterations
         mc$cores  <- input$mccv_cores
@@ -1431,8 +1444,13 @@ server <- function(input, output, session) {
         p <- mc$params
         groups_per_fold <- vapply(ok, function(r) r$n_groups %||% NA_integer_, integer(1))
         feats_per_fold  <- vapply(ok, function(r) r$features_count %||% NA_integer_, integer(1))
+        best_ks <- vapply(ok, function(r) r$best_k %||% NA_integer_, integer(1))
+        best_k_mode <- as.integer(names(sort(table(best_ks), decreasing = TRUE))[1])
         rv$score_summary <- list(
           mode = "mccv",
+          modeling = sprintf("accumulative top-1..%d per fold", p$top_n %||% 10),
+          ranking = "group classifier score (train-only)",
+          best_k = best_k_mode,
           dataset_name = rv$dataset_name %||% "dataset",
           scope = if (isTRUE(mc$scope_all)) "All groups (pre-score keeps 100%/fold)"
                   else "Top pre-scored groups",
@@ -1470,7 +1488,8 @@ server <- function(input, output, session) {
         pre_score_method = p$pre_score_method,
         pre_score_top_percent = p$pre_score_top_percent,
         score_method = p$score_method, model_method = p$model_method,
-        score_args = p$score_args, model_args = p$model_args, seed = p$seed)
+        score_args = p$score_args, model_args = p$model_args,
+        top_n = p$top_n %||% 10, seed = p$seed)
       res <- if (mc$cores > 1 && .Platform$OS.type != "windows") {
         parallel::mclapply(idx, runner, mc.cores = mc$cores)
       } else {
@@ -1565,15 +1584,15 @@ server <- function(input, output, session) {
     df <- do.call(rbind, lapply(rows, function(r) {
       if (r$status == "success") {
         data.frame(Fold = r$fold, Status = "OK",
+                   Best_k = as.character(r$best_k %||% NA),
                    Accuracy = round(as.numeric(r$metrics$Accuracy), 4),
                    Kappa = round(as.numeric(r$metrics$Cohens_kappa), 4),
                    Sensitivity = round(as.numeric(r$metrics$Sensitivity), 4),
                    Features = as.character(r$features_count %||% NA),
-                   Groups = as.character(r$n_groups %||% NA),
                    stringsAsFactors = FALSE)
       } else {
-        data.frame(Fold = r$fold, Status = "FAIL", Accuracy = NA, Kappa = NA,
-                   Sensitivity = NA, Features = "—", Groups = "—",
+        data.frame(Fold = r$fold, Status = "FAIL", Best_k = "—",
+                   Accuracy = NA, Kappa = NA, Sensitivity = NA, Features = "—",
                    stringsAsFactors = FALSE)
       }
     }))
@@ -1593,13 +1612,18 @@ server <- function(input, output, session) {
     items <- if (identical(s$mode, "single")) {
       list(
         row("Mode", "Single-fold scoring"),
+        row("Modeling", s$modeling %||% "accumulative top-k"),
+        row("Ranking", s$ranking %||% "group classifier score (train-only)"),
         row("Groups source", s$scope),
         row("Scoring algorithm", s$classifier),
         row("Hyperparameters", s$params),
-        row("Groups scored", sprintf("%d (of %d %s)",
-                                      s$n_groups_scored, s$n_groups_available,
-                                      if (grepl("^All", s$scope)) "total" else "pre-selected")),
-        row("Features in joint model", format(s$n_features, big.mark = ",")),
+        row("Candidate groups", format(s$n_candidates %||% NA, big.mark = ",")),
+        row("Accumulative depth (K)", s$n_groups_scored),
+        row("Best k (max accuracy)", s$best_k %||% NA),
+        row("Features at best k", format(s$n_features, big.mark = ",")),
+        row("Pre-scoring", if (identical(s$prescore_method, "skipped")) "skipped"
+                           else sprintf("%s · top %s%%", toupper(s$prescore_method),
+                                        s$prescore_top_percent)),
         row("Pre-scoring", if (identical(s$prescore_method, "skipped")) "skipped"
                            else sprintf("%s · top %s%%", toupper(s$prescore_method),
                                         s$prescore_top_percent)),
@@ -1610,6 +1634,9 @@ server <- function(input, output, session) {
     } else {
       list(
         row("Mode", sprintf("Parallel MCCV · %d cores", s$cores)),
+        row("Modeling", s$modeling %||% "accumulative top-k per fold"),
+        row("Ranking", s$ranking %||% "group classifier score (train-only)"),
+        row("Most frequent best k", s$best_k %||% NA),
         row("Groups source", s$scope),
         row("Iterations (folds)", sprintf("%d (%d succeeded)",
                                           s$n_iterations, s$n_folds_ok)),
@@ -1633,6 +1660,47 @@ server <- function(input, output, session) {
       items
     )
   })
+
+  # Accumulative metric-vs-k curve (single-fold: one line; MCCV: mean +/- SD band).
+  output$plot_accumulative <- renderPlot({
+    req(rv$scored)
+    metric <- input$acc_metric %||% "Accuracy"
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        col.main = "#cccccc", fg = "#555555", mar = c(4, 4, 2, 1))
+    if (isTRUE(input$run_mccv_mode)) {
+      ok <- Filter(function(r) !is.null(r) && r$status == "success",
+                   rv$mccv_results$folds %||% list())
+      accs <- Filter(Negate(is.null), lapply(ok, `[[`, "accumulative"))
+      req(length(accs) > 0)
+      long <- do.call(rbind, accs)
+      ks <- sort(unique(long$k))
+      mean_v <- vapply(ks, function(kk) mean(long[long$k == kk, metric], na.rm = TRUE), numeric(1))
+      sd_v   <- vapply(ks, function(kk) stats::sd(long[long$k == kk, metric], na.rm = TRUE), numeric(1))
+      sd_v[is.na(sd_v)] <- 0
+      plot(ks, mean_v, type = "n", ylim = c(0, 1), xlab = "Number of top groups (k)",
+           ylab = metric, las = 1, main = "")
+      polygon(c(ks, rev(ks)), c(mean_v - sd_v, rev(mean_v + sd_v)),
+              col = grDevices::adjustcolor("#4a90d9", 0.25), border = NA)
+      lines(ks, mean_v, col = "#4a90d9", lwd = 2)
+      points(ks, mean_v, pch = 19, col = "#4a90d9")
+      bk <- ks[which.max(mean_v)]
+      abline(v = bk, col = "#f1c232", lwd = 2, lty = 2)
+      legend("bottomright", bty = "n", text.col = "#aaaaaa",
+             legend = sprintf("best k = %d (mean %s = %.3f)", bk, metric, max(mean_v)),
+             col = "#f1c232", lwd = 2, lty = 2)
+    } else {
+      a <- rv$accumulative
+      req(!is.null(a))
+      plot(a$k, a[[metric]], type = "o", pch = 19, col = "#4a90d9", lwd = 2,
+           ylim = c(0, 1), xlab = "Number of top groups (k)", ylab = metric,
+           las = 1, main = "")
+      bk <- a$k[which.max(a[[metric]])]
+      abline(v = bk, col = "#f1c232", lwd = 2, lty = 2)
+      legend("bottomright", bty = "n", text.col = "#aaaaaa",
+             legend = sprintf("best k = %d (%s = %.3f)", bk, metric, max(a[[metric]], na.rm = TRUE)),
+             col = "#f1c232", lwd = 2, lty = 2)
+    }
+  }, bg = "transparent")
 
   # ── Results export (Excel + CSV bundle) ────────────────────────────────
   # Assemble the in-memory result object for the export functions.

@@ -60,6 +60,7 @@ gsm_tbl_iteration_metrics <- function(folds) {
     data.frame(
       Iteration    = f$fold,
       Status       = f$status %|null|% "error",
+      Best_k       = if (ok) f$best_k %|null|% NA_integer_ else NA_integer_,
       Accuracy     = getm(m, "Accuracy"),
       Sensitivity  = getm(m, "Sensitivity"),
       Specificity  = getm(m, "Specificity"),
@@ -104,8 +105,48 @@ gsm_tbl_group_ranking <- function(folds, dataset, top_n = 10) {
   out[order(-out$TopN_Appearances, -out$Mean_Accuracy, out$Mean_Rank), , drop = FALSE]
 }
 
-#' Aggregate metric summary (mirrors `res1`). Uses `result$metrics_summary`
-#' when present, otherwise computes from folds.
+#' Accumulative top-k performance averaged over folds (mirrors `res1`).
+#' One row per k with Mean/SD of each metric — the accuracy-vs-#groups curve.
+#' @keywords internal
+gsm_tbl_accumulative_summary <- function(folds) {
+  ok <- .ok_folds(folds)
+  accs <- Filter(Negate(is.null), lapply(ok, `[[`, "accumulative"))
+  if (length(accs) == 0) return(NULL)
+  long <- do.call(rbind, accs)
+  metrics <- c("Accuracy", "Sensitivity", "Specificity", "Precision",
+               "F_measure", "Cohens_kappa")
+  ks <- sort(unique(long$k))
+  rows <- lapply(ks, function(kk) {
+    sub <- long[long$k == kk, , drop = FALSE]
+    row <- data.frame(k = kk, N_folds = nrow(sub),
+                      Mean_Features = round(mean(sub$n_features), 1),
+                      stringsAsFactors = FALSE)
+    for (m in metrics) {
+      row[[paste0("Mean_", m)]] <- round(mean(sub[[m]], na.rm = TRUE), 4)
+      row[[paste0("SD_", m)]]   <- round(stats::sd(sub[[m]], na.rm = TRUE), 4)
+    }
+    row
+  })
+  do.call(rbind, rows)
+}
+
+#' Every iteration x every k accumulative result (mirrors `res2`).
+#' @keywords internal
+gsm_tbl_iteration_accumulative <- function(folds) {
+  ok <- .ok_folds(folds)
+  rows <- lapply(ok, function(f) {
+    a <- f$accumulative
+    if (is.null(a)) return(NULL)
+    a2 <- data.frame(Iteration = f$fold, a, stringsAsFactors = FALSE)
+    num <- vapply(a2, is.numeric, logical(1))
+    a2[num] <- lapply(a2[num], function(v) round(v, 4))
+    a2
+  })
+  do.call(rbind, rows)
+}
+
+#' Aggregate best-k metric summary. Uses `result$metrics_summary` when present,
+#' otherwise computes from per-fold best-k metrics.
 #' @keywords internal
 gsm_tbl_metric_summary <- function(result) {
   ms <- result$metrics_summary
@@ -261,12 +302,21 @@ gsm_tbl_run_summary <- function(summary, dataset = NULL) {
     N_Groups_Containing = ngrp, stringsAsFactors = FALSE
   )
 
-  list(
+  out <- list(
     RunSummary   = gsm_tbl_run_summary(summary, dataset),
     FinalMetrics = final_metrics,
     GroupScores  = group_scores,
     FeatureList  = feature_list
   )
+  # Accumulative top-k curve for the single split, when available.
+  if (!is.null(result$accumulative) && nrow(result$accumulative) > 0) {
+    a <- result$accumulative
+    num <- vapply(a, is.numeric, logical(1))
+    a[num] <- lapply(a[num], function(v) round(v, 4))
+    out <- c(list(RunSummary = out$RunSummary, Accumulative = a),
+             out[c("FinalMetrics", "GroupScores", "FeatureList")])
+  }
+  out
 }
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -287,14 +337,16 @@ gsm_export_tables <- function(result, dataset, summary = NULL, top_n = 10) {
   }
   folds <- result$folds
   tbls <- list(
-    RunSummary           = gsm_tbl_run_summary(summary, dataset),
-    MetricSummary        = gsm_tbl_metric_summary(result),
-    IterationMetrics     = gsm_tbl_iteration_metrics(folds),
-    IterationGroupScores = gsm_tbl_iteration_group_scores(folds, dataset),
-    GroupRanking         = gsm_tbl_group_ranking(folds, dataset, top_n = top_n),
-    GroupFeatureAssoc    = gsm_tbl_group_feature_assoc(folds, dataset),
-    PreScoreSignificance = gsm_tbl_pre_score_significance(folds),
-    RankedFeatures       = gsm_tbl_ranked_features(folds, dataset)
+    RunSummary            = gsm_tbl_run_summary(summary, dataset),
+    AccumulativeSummary   = gsm_tbl_accumulative_summary(folds),    # res1
+    IterationAccumulative = gsm_tbl_iteration_accumulative(folds),  # res2
+    BestKPerIteration     = gsm_tbl_iteration_metrics(folds),
+    MetricSummary         = gsm_tbl_metric_summary(result),
+    IterationGroupScores  = gsm_tbl_iteration_group_scores(folds, dataset),
+    GroupRanking          = gsm_tbl_group_ranking(folds, dataset, top_n = top_n),
+    GroupFeatureAssoc     = gsm_tbl_group_feature_assoc(folds, dataset),
+    PreScoreSignificance  = gsm_tbl_pre_score_significance(folds),
+    RankedFeatures        = gsm_tbl_ranked_features(folds, dataset)
   )
   # Drop tables that are empty/NULL (e.g. pre-scores absent for method "none").
   Filter(function(x) !is.null(x) && nrow(x) > 0, tbls)
@@ -328,17 +380,20 @@ gsm_write_xlsx <- function(tables, file) {
 
 # Map table keys to original-G-S-M-style CSV file names.
 .csv_name_map <- c(
-  RunSummary           = "RunSummary",
-  MetricSummary        = "res1_MetricSummary",
-  IterationMetrics     = "res2_IterationMetrics",
-  IterationGroupScores = "res2_IterationGroupScores",
-  GroupRanking         = "RankdGroups_by_Freq",
-  GroupFeatureAssoc    = "Groups_Features_Associations_over_all_iterations",
-  PreScoreSignificance = "PreScoreSignificance",
-  RankedFeatures       = "rankedFeatures",
-  FinalMetrics         = "FinalMetrics",
-  GroupScores          = "GroupScores",
-  FeatureList          = "FeatureList"
+  RunSummary            = "RunSummary",
+  AccumulativeSummary   = "res1_AccumulativePerformance",
+  IterationAccumulative = "res2_AllIterations",
+  BestKPerIteration     = "BestK_per_iteration",
+  MetricSummary         = "MetricSummary_bestK",
+  IterationGroupScores  = "IterationGroupScores",
+  GroupRanking          = "RankdGroups_by_Freq",
+  GroupFeatureAssoc     = "Groups_Features_Associations_over_all_iterations",
+  PreScoreSignificance  = "PreScoreSignificance",
+  RankedFeatures        = "rankedFeatures",
+  Accumulative          = "res1_Accumulative",
+  FinalMetrics          = "FinalMetrics",
+  GroupScores           = "GroupScores",
+  FeatureList           = "FeatureList"
 )
 
 #' Write result tables to a zip bundle of CSV files

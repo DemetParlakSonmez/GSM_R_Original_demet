@@ -45,6 +45,60 @@ score_group <- function(expr, labels, genes, train_idx,
 }
 
 
+#' Score a single group using TRAINING data only
+#'
+#' Computes a ranking score for a group without touching the held-out test
+#' samples — Random Forest out-of-bag accuracy, SVM internal cross-validation,
+#' or KNN leave-one-out on the training split. This is the criterion used to
+#' rank groups for the accumulative modeling step.
+#'
+#' @param expr Numeric matrix (genes x samples).
+#' @param labels Factor of class labels.
+#' @param genes Character vector of gene names for this group.
+#' @param train_idx Integer vector of training sample indices.
+#' @param method Classifier method (`"rf"`, `"svm"`, `"knn"`).
+#' @param cv Internal CV folds for SVM (default 5). KNN uses leave-one-out.
+#' @param ... Additional arguments passed to the classifier.
+#' @return A single numeric training-only accuracy (NA if no usable genes).
+#' @export
+score_group_train <- function(expr, labels, genes, train_idx,
+                              method = "rf", cv = 5, ...) {
+  stopifnot(is.matrix(expr) && is.numeric(expr))
+  stopifnot(is.factor(labels))
+  genes <- intersect(genes, rownames(expr))
+  if (length(genes) == 0) return(NA_real_)
+
+  x <- as.data.frame(t(expr[genes, train_idx, drop = FALSE]))
+  y <- droplevels(labels[train_idx])
+  if (nlevels(y) < 2) return(NA_real_)
+
+  if (method == "rf") {
+    if (!requireNamespace("randomForest", quietly = TRUE))
+      stop("Package 'randomForest' is required for method 'rf'.")
+    model <- randomForest::randomForest(x = x, y = y, ...)
+    return(as.numeric(1 - utils::tail(model$err.rate[, "OOB"], 1)))
+  }
+  if (method == "svm") {
+    if (!requireNamespace("e1071", quietly = TRUE))
+      stop("Package 'e1071' is required for method 'svm'.")
+    k <- max(2, min(cv, min(table(y))))           # CV folds <= smallest class
+    model <- e1071::svm(x = x, y = y, cross = k, ...)
+    return(as.numeric(model$tot.accuracy) / 100)
+  }
+  if (method == "knn") {
+    if (!requireNamespace("class", quietly = TRUE))
+      stop("Package 'class' is required for method 'knn'.")
+    kk <- list(...)$k %||% 3
+    pred <- class::knn.cv(train = x, cl = y, k = kk)   # leave-one-out
+    return(mean(pred == y))
+  }
+  stop("Unknown scoring method: '", method, "'.")
+}
+
+# Local null-coalesce (base R %||% only from 4.4.0).
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+
 #' Score a group using Random Forest
 #'
 #' Trains a Random Forest classifier on the group's genes from training
