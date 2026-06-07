@@ -490,8 +490,16 @@ ui <- page_navbar(
             downloadButton("dl_xlsx", "Download Excel workbook (.xlsx)",
                            class = "btn-primary"),
             downloadButton("dl_csv", "Download CSV bundle (.zip)",
-                           class = "btn-outline-light")
-          )
+                           class = "btn-outline-light"),
+            actionButton("save_disk", "\U0001F4C1 Save to workspace folder",
+                         class = "btn-outline-light",
+                         icon = NULL)
+          ),
+          tags$small(class = "text-muted d-block mt-2",
+                     "Tip: file downloads don't work in VS Code's Simple Browser — use ",
+                     tags$b("Save to workspace folder"), " (writes files into the project), ",
+                     "or open the app in a real browser tab."),
+          uiOutput("save_disk_path")
         ),
 
         # Display Single Fold Mode Results
@@ -1684,6 +1692,38 @@ server <- function(input, output, session) {
     filename = function() gsm_export_filename(rv$score_summary, rv$dataset, "zip"),
     content  = function(file) .do_export(file, "csv")
   )
+
+  # Save-to-disk fallback (works in any browser, incl. VS Code Simple Browser):
+  # writes the workbook + CSV bundle into a "gsm_outputs/" folder in the project.
+  observeEvent(input$save_disk, {
+    req(rv$scored)
+    out_dir <- file.path(getOption("gsmR.launch_dir", getwd()), "gsm_outputs")
+    tryCatch({
+      dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+      tbls   <- gsm_export_tables(assemble_result(), rv$dataset, rv$score_summary)
+      xlsx_f <- file.path(out_dir, gsm_export_filename(rv$score_summary, rv$dataset, "xlsx"))
+      zip_f  <- file.path(out_dir, gsm_export_filename(rv$score_summary, rv$dataset, "zip"))
+      gsm_write_xlsx(tbls, xlsx_f)
+      gsm_write_csv_zip(tbls, zip_f,
+                        prefix = sub("\\.zip$", "", basename(zip_f)))
+      rv$saved_paths <- c(xlsx_f, zip_f)
+      showNotification(paste0("✅ Saved results to: ", out_dir),
+                       type = "message", duration = 12)
+    }, error = function(e) {
+      showNotification(paste("❌ Save failed:", conditionMessage(e)),
+                       type = "error", duration = 12)
+    })
+  })
+
+  output$save_disk_path <- renderUI({
+    req(rv$saved_paths)
+    tags$div(
+      class = "value-box", style = "margin-top:10px; background: rgba(106,168,79,0.12); border-left:4px solid #6aa84f;",
+      tags$div(style = "font-weight:600;", "✅ Files written to workspace:"),
+      tags$ul(style = "margin:6px 0 0 0;",
+              lapply(rv$saved_paths, function(p) tags$li(tags$code(p))))
+    )
+  })
 
   output$time_score <- renderUI({
     req(rv$scored, rv$time_score)
