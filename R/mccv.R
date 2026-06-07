@@ -23,15 +23,20 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
                           pre_score_method = "anova", pre_score_top_percent = 1,
                           score_method = "rf", model_method = "rf",
                           score_args = list(), model_args = list(),
-                          top_n = 10, shave = TRUE, fdr_alpha = 0.05, seed = 42) {
+                          top_n = 10, shave = TRUE, fdr_alpha = 0.05,
+                          normalize = FALSE, seed = 42) {
   fold_seed <- seed + fold
   tryCatch({
     split <- split_train_test(dataset$labels, ratio = train_ratio, seed = fold_seed)
 
+    # Optional leakage-free z-score: fit mean/sd on TRAIN, apply to all columns.
+    expr_use <- if (isTRUE(normalize))
+      zscore_fit_apply(dataset$expr, split$train) else dataset$expr
+
     # Phase I — training-only gene shaving (Welch t-test + BH FDR), then group.
     keep_genes <- if (isTRUE(shave))
-      shave_genes(dataset$expr, dataset$labels, split$train, alpha = fdr_alpha)
-    else rownames(dataset$expr)
+      shave_genes(expr_use, dataset$labels, split$train, alpha = fdr_alpha)
+    else rownames(expr_use)
 
     # Candidate groups: optional ANOVA group pre-filter, then shave their genes.
     candidates <- pre_score_groups(dataset, split$train,
@@ -45,7 +50,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     # Phase II — SCORE each candidate (mean F1, k-fold CV, TRAIN only) -> rank.
     scores <- vapply(names(candidates), function(name) {
       do.call(score_group_train, c(
-        list(expr = dataset$expr, labels = dataset$labels,
+        list(expr = expr_use, labels = dataset$labels,
              genes = candidates[[name]], train_idx = split$train,
              method = score_method),
         score_args))
@@ -61,7 +66,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
       if (n_feat == prev_features) next            # expand: no new features at this k
       prev_features <- n_feat
       m <- do.call(build_model, c(
-        list(expr = dataset$expr, labels = dataset$labels, top_groups = sub,
+        list(expr = expr_use, labels = dataset$labels, top_groups = sub,
              train_idx = split$train, method = model_method),
         model_args))
       acc_rows[[length(acc_rows) + 1L]] <- data.frame(
@@ -69,6 +74,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
         Accuracy = m$metrics$Accuracy, Sensitivity = m$metrics$Sensitivity,
         Specificity = m$metrics$Specificity, Precision = m$metrics$Precision,
         F_measure = m$metrics$F_measure, Cohens_kappa = m$metrics$Cohens_kappa,
+        AUC = m$metrics$AUC %||% NA_real_,
         stringsAsFactors = FALSE)
       m$.k <- k
       # Best model = highest F1 (the G-S-M selection metric).
@@ -125,7 +131,7 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
                      score_method = "rf", model_method = "rf",
                      score_args = list(), model_args = list(),
                      top_n = 10, shave = TRUE, fdr_alpha = 0.05,
-                     cores = NULL, seed = 44, ...) {
+                     normalize = FALSE, cores = NULL, seed = 44, ...) {
   stopifnot(inherits(dataset, "gsm_dataset"))
   stopifnot(is.numeric(n_iterations) && n_iterations > 0)
   stopifnot(is.numeric(train_ratio) && train_ratio > 0 && train_ratio < 1)
@@ -147,7 +153,7 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
                   score_method = score_method, model_method = model_method,
                   score_args = score_args, model_args = model_args,
                   top_n = top_n, shave = shave, fdr_alpha = fdr_alpha,
-                  seed = seed)
+                  normalize = normalize, seed = seed)
   }
 
   # Run in parallel or sequentially based on cores and OS

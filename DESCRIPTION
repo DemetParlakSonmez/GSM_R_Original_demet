@@ -27,6 +27,8 @@ Imports:
 Suggests:
     testthat (>= 3.0.0),
     randomForest,
+    RobustRankAggreg,
+    e1071,
     caret,
     shiny,
     bslib,

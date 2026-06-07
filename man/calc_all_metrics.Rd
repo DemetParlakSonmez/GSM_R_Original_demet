@@ -4,7 +4,7 @@
 \alias{calc_all_metrics}
 \title{Calculate all classification metrics}
 \usage{
-calc_all_metrics(actual, predicted, positive_class = NULL)
+calc_all_metrics(actual, predicted, positive_class = NULL, prob = NULL)
 }
 \arguments{
 \item{actual}{Factor or vector of actual class labels.}
@@ -12,10 +12,13 @@ calc_all_metrics(actual, predicted, positive_class = NULL)
 \item{predicted}{Factor or vector of predicted class labels.}
 
 \item{positive_class}{The label of the positive class.}
+
+\item{prob}{Optional numeric vector of predicted positive-class probabilities
+(same length/order as \code{actual}); enables AUC-ROC.}
 }
 \value{
 Named list with: Accuracy, Sensitivity, Specificity, Precision,
-F_measure, Cohens_kappa.
+F_measure, Cohens_kappa, AUC.
 }
 \description{
 Convenience function returning all metrics as a named list. Column names

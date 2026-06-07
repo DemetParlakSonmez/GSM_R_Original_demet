@@ -426,6 +426,8 @@ ui <- page_navbar(
           numericInput("fdr_alpha", "FDR threshold (alpha)",
                        value = 0.05, min = 0.001, max = 0.5, step = 0.01)
         ),
+        checkboxInput("normalize_z",
+                      "Z-score normalize (per-fold, train-fit)", value = FALSE),
 
         radioButtons("score_scope", "Which groups to score",
                      choices = c("Top pre-scored groups (recommended)" = "selected",
@@ -519,7 +521,7 @@ ui <- page_navbar(
             sidebar = sidebar(
               width = 220, position = "right",
               selectInput("acc_metric", "Metric",
-                          choices = c("Accuracy", "Sensitivity", "Specificity",
+                          choices = c("Accuracy", "AUC", "Sensitivity", "Specificity",
                                       "Precision", "F_measure", "Cohens_kappa"),
                           selected = "Accuracy")
             ),
@@ -1310,9 +1312,13 @@ server <- function(input, output, session) {
         results <- list()
         final_model <- NULL; best_k <- NA_integer_; n_shaved <- NA_integer_
         withProgress(message = "Gene shaving + scoring + accumulative modeling...", value = 0, {
+          # Optional leakage-free z-score (fit on train, applied to all columns).
+          expr_use <- if (isTRUE(input$normalize_z))
+            zscore_fit_apply(rv$dataset$expr, rv$train_idx) else rv$dataset$expr
+
           # Phase I — training-only gene shaving (Welch t-test + BH FDR).
           if (isTRUE(input$shave_genes)) {
-            keep_genes <- shave_genes(rv$dataset$expr, rv$dataset$labels,
+            keep_genes <- shave_genes(expr_use, rv$dataset$labels,
                                       rv$train_idx, alpha = input$fdr_alpha)
             candidates <- shave_groups(candidates, keep_genes)
             n_shaved <- length(keep_genes)
@@ -1328,7 +1334,7 @@ server <- function(input, output, session) {
             setProgress(0.5 * i / length(candidates),
                         detail = sprintf("Scoring %s (%d/%d)", gname, i, length(candidates)))
             scores[i] <- do.call(score_group_train, c(
-              list(expr = rv$dataset$expr, labels = rv$dataset$labels,
+              list(expr = expr_use, labels = rv$dataset$labels,
                    genes = candidates[[gname]], train_idx = rv$train_idx,
                    method = input$score_method), score_args))
             results[[gname]] <- list(accuracy = scores[i])
@@ -1344,7 +1350,7 @@ server <- function(input, output, session) {
             if (length(unique(unlist(sub))) == prev_features) next
             prev_features <- length(unique(unlist(sub)))
             m <- do.call(build_model, c(
-              list(expr = rv$dataset$expr, labels = rv$dataset$labels,
+              list(expr = expr_use, labels = rv$dataset$labels,
                    top_groups = sub, train_idx = rv$train_idx,
                    method = input$score_method), score_args))
             acc_rows[[length(acc_rows) + 1L]] <- data.frame(
@@ -1352,6 +1358,7 @@ server <- function(input, output, session) {
               Accuracy = m$metrics$Accuracy, Sensitivity = m$metrics$Sensitivity,
               Specificity = m$metrics$Specificity, Precision = m$metrics$Precision,
               F_measure = m$metrics$F_measure, Cohens_kappa = m$metrics$Cohens_kappa,
+              AUC = m$metrics$AUC %||% NA_real_,
               stringsAsFactors = FALSE)
             m$.k <- k
             if (is.null(best_model) || m$metrics$F_measure > best_model$metrics$F_measure)
@@ -1419,7 +1426,8 @@ server <- function(input, output, session) {
           score_method = input$score_method, model_method = m_method,
           score_args = score_args, model_args = model_args,
           top_n = input$n_top_groups, shave = isTRUE(input$shave_genes),
-          fdr_alpha = input$fdr_alpha, seed = input$score_seed
+          fdr_alpha = input$fdr_alpha, normalize = isTRUE(input$normalize_z),
+          seed = input$score_seed
         )
         mc$n      <- input$mccv_iterations
         mc$cores  <- input$mccv_cores
@@ -1521,7 +1529,8 @@ server <- function(input, output, session) {
         score_method = p$score_method, model_method = p$model_method,
         score_args = p$score_args, model_args = p$model_args,
         top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
-        fdr_alpha = p$fdr_alpha %||% 0.05, seed = p$seed)
+        fdr_alpha = p$fdr_alpha %||% 0.05, normalize = p$normalize %||% FALSE,
+        seed = p$seed)
       res <- if (mc$cores > 1 && .Platform$OS.type != "windows") {
         parallel::mclapply(idx, runner, mc.cores = mc$cores)
       } else {
