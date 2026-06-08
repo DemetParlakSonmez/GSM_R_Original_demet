@@ -26,7 +26,7 @@ rra_aggregate <- function(rank_lists) {
       error = function(e) NULL)
     if (!is.null(res)) {
       out <- data.frame(Name = as.character(res$Name),
-                        RRA_Score = as.numeric(res$Score),
+                        RRA_Score = signif(as.numeric(res$Score), 3),
                         stringsAsFactors = FALSE)
       out <- out[order(out$RRA_Score), , drop = FALSE]
       out$Rank <- seq_len(nrow(out))

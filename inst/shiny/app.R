@@ -491,96 +491,140 @@ ui <- page_navbar(
       conditionalPanel(
         condition = "output.score_done && !output.mccv_running",
         uiOutput("time_score"),
-        uiOutput("score_summary"),
 
-        # ── Export results (Excel workbook + CSV bundle) ──────────────────
-        card(
-          card_header("\U0001F4BE Export results"),
-          uiOutput("export_note"),
-          tags$div(
-            class = "d-flex gap-2 flex-wrap",
-            downloadButton("dl_xlsx", "Download Excel workbook (.xlsx)",
-                           class = "btn-primary"),
-            downloadButton("dl_csv", "Download CSV bundle (.zip)",
-                           class = "btn-outline-light"),
-            actionButton("save_disk", "\U0001F4C1 Save to workspace folder",
-                         class = "btn-outline-light",
-                         icon = NULL)
-          ),
-          tags$small(class = "text-muted d-block mt-2",
-                     "Tip: file downloads don't work in VS Code's Simple Browser — use ",
-                     tags$b("Save to workspace folder"), " (writes files into the project), ",
-                     "or open the app in a real browser tab."),
-          uiOutput("save_disk_path")
-        ),
+        # ── Professional tabbed results dashboard ─────────────────────────
+        navset_card_tab(
+          id = "score_tabs",
 
-        # Accumulative performance curve (top-1..K) — the hallmark G-S-M plot.
-        card(
-          card_header("Accumulative performance: metric vs. number of top groups (k)"),
-          layout_sidebar(
-            sidebar = sidebar(
-              width = 220, position = "right",
-              selectInput("acc_metric", "Metric",
-                          choices = c("Accuracy", "AUC", "Sensitivity", "Specificity",
-                                      "Precision", "F_measure", "Cohens_kappa"),
-                          selected = "Accuracy")
+          # ── Overview: run summary + headline performance ───────────────
+          nav_panel(
+            title = "\U0001F4CA Overview",
+            uiOutput("score_summary"),
+            conditionalPanel(
+              condition = "!input.run_mccv_mode",
+              card(
+                card_header("Best-k joint model performance"),
+                layout_columns(col_widths = c(4, 4, 4),
+                  uiOutput("model_vbox_acc"), uiOutput("model_vbox_kappa"),
+                  uiOutput("model_vbox_sens")),
+                layout_columns(col_widths = c(4, 4, 4),
+                  uiOutput("model_vbox_spec"), uiOutput("model_vbox_prec"),
+                  uiOutput("model_vbox_f1"))
+              )
             ),
-            plotOutput("plot_accumulative", height = "320px")
-          )
-        ),
-
-        # Display Single Fold Mode Results
-        conditionalPanel(
-          condition = "!input.run_mccv_mode",
-          layout_columns(
-            col_widths = c(6, 6),
-            card(
-              card_header("Group Scores (by Accuracy)"),
-              DTOutput("score_table")
-            ),
-            card(
-              card_header("Score Distribution"),
-              plotOutput("plot_scores", height = "300px")
+            conditionalPanel(
+              condition = "input.run_mccv_mode",
+              card(
+                card_header("Aggregate performance across folds (mean ± SD, 95% CI)"),
+                DTOutput("mccv_summary_table")
+              )
             )
           ),
-          card(
-            card_header("Final Joint Model Performance (Combined Top Features)"),
-            layout_columns(
-              col_widths = c(4, 4, 4),
-              uiOutput("model_vbox_acc"),
-              uiOutput("model_vbox_kappa"),
-              uiOutput("model_vbox_sens")
-            ),
-            layout_columns(
-              col_widths = c(4, 4, 4),
-              uiOutput("model_vbox_spec"),
-              uiOutput("model_vbox_prec"),
-              uiOutput("model_vbox_f1")
-            )
-          )
-        ),
-        
-        # Display Parallel MCCV Mode Results
-        conditionalPanel(
-          condition = "input.run_mccv_mode",
-          card(
-            card_header("Parallel MCCV Performance Summary (Aggregate)"),
-            DTOutput("mccv_summary_table")
-          ),
-          layout_columns(
-            col_widths = c(6, 6),
+
+          # ── Performance: accumulative metric-vs-k curve ────────────────
+          nav_panel(
+            title = "\U0001F4C8 Performance",
             card(
-              card_header("MCCV Folds Performance Visualizer"),
-              plotOutput("plot_mccv_folds", height = "350px")
+              card_header("Accumulative performance: metric vs. number of top groups (k)"),
+              layout_sidebar(
+                sidebar = sidebar(
+                  width = 220, position = "right",
+                  selectInput("acc_metric", "Metric",
+                              choices = c("Accuracy", "AUC", "Sensitivity",
+                                          "Specificity", "Precision", "F_measure",
+                                          "Cohens_kappa"),
+                              selected = "Accuracy"),
+                  tags$small(class = "text-muted",
+                             "MCCV shows mean ± SD across folds; the dashed line marks best k.")
+                ),
+                plotOutput("plot_accumulative", height = "340px")
+              )
             ),
-            card(
-              card_header("Average Group Accuracy (Top 10 Stable)"),
-              plotOutput("plot_mccv_groups", height = "350px")
+            conditionalPanel(
+              condition = "input.run_mccv_mode",
+              card(
+                card_header("Per-fold metric distribution"),
+                plotOutput("plot_mccv_folds", height = "320px")
+              )
             )
           ),
-          card(
-            card_header("Group Stability & Accuracies (All Scored Groups)"),
-            DTOutput("mccv_stability_table")
+
+          # ── Groups: scores, frequency ranking, and RRA consensus ───────
+          nav_panel(
+            title = "\U0001F5C2️ Groups",
+            conditionalPanel(
+              condition = "!input.run_mccv_mode",
+              layout_columns(col_widths = c(7, 5),
+                card(card_header("Group scores (train-only F1, ranked)"),
+                     DTOutput("score_table")),
+                card(card_header("Score distribution"),
+                     plotOutput("plot_scores", height = "320px")))
+            ),
+            conditionalPanel(
+              condition = "input.run_mccv_mode",
+              layout_columns(col_widths = c(6, 6),
+                card(card_header("Average group accuracy (top stable)"),
+                     plotOutput("plot_mccv_groups", height = "320px")),
+                card(card_header("\U0001F3C5 Robust Rank Aggregation — groups over iterations"),
+                     DTOutput("rra_group_table"))),
+              card(card_header("Group stability & accuracies (all scored groups)"),
+                   DTOutput("mccv_stability_table"))
+            )
+          ),
+
+          # ── Genes: importance and RRA consensus across iterations ──────
+          nav_panel(
+            title = "\U0001F9EC Genes",
+            conditionalPanel(
+              condition = "input.run_mccv_mode",
+              card(card_header("\U0001F3C5 Robust Rank Aggregation — genes over iterations (RF importance)"),
+                   DTOutput("rra_feature_table")),
+              card(card_header("Ranked features (importance + selection frequency)"),
+                   DTOutput("ranked_features_table"))
+            ),
+            conditionalPanel(
+              condition = "!input.run_mccv_mode",
+              card(card_header("Genes in the best-k joint model"),
+                   DTOutput("single_feature_table"))
+            )
+          ),
+
+          # ── Iterations: per-iteration detail (MCCV) ────────────────────
+          nav_panel(
+            title = "\U0001F501 Iterations",
+            conditionalPanel(
+              condition = "input.run_mccv_mode",
+              card(card_header("Best-k model per iteration"),
+                   DTOutput("iter_metrics_table")),
+              card(card_header("Accumulative performance — every iteration × k"),
+                   DTOutput("iter_accum_table"))
+            ),
+            conditionalPanel(
+              condition = "!input.run_mccv_mode",
+              card(card_header("Accumulative performance (this split)"),
+                   DTOutput("iter_accum_table_single"))
+            )
+          ),
+
+          # ── Export ─────────────────────────────────────────────────────
+          nav_panel(
+            title = "\U0001F4BE Export",
+            card(
+              uiOutput("export_note"),
+              tags$div(
+                class = "d-flex gap-2 flex-wrap",
+                downloadButton("dl_xlsx", "Download Excel workbook (.xlsx)",
+                               class = "btn-primary"),
+                downloadButton("dl_csv", "Download CSV bundle (.zip)",
+                               class = "btn-outline-light"),
+                actionButton("save_disk", "\U0001F4C1 Save to workspace folder",
+                             class = "btn-outline-light")
+              ),
+              tags$small(class = "text-muted d-block mt-2",
+                         "Tip: downloads don't work in VS Code's Simple Browser — use ",
+                         tags$b("Save to workspace folder"), ", or open the app in a real browser tab."),
+              uiOutput("save_disk_path")
+            )
           )
         )
       ),
@@ -1911,11 +1955,8 @@ server <- function(input, output, session) {
   # Parallel MCCV Renderers: Summary statistics table
   output$mccv_summary_table <- renderDT({
     req(rv$mccv_results)
-    df <- rv$mccv_results$metrics_summary
-    df$Metric <- rownames(df)
-    df <- df[, c("Metric", "Mean", "SD")]
-    df$Mean <- round(df$Mean, 4)
-    df$SD <- round(df$SD, 4)
+    # Best-k metric summary with mean, SD and bootstrap-style 95% CI (incl. AUC).
+    df <- gsmR:::gsm_tbl_metric_summary(rv$mccv_results)
     datatable(df, options = list(
       dom = "t",
       initComplete = JS("function(settings, json) {",
@@ -1935,6 +1976,54 @@ server <- function(input, output, session) {
   }, bg = "transparent")
 
   # Parallel MCCV Renderers: Stability ranking table
+  # ── RRA + per-iteration tables for the results dashboard ────────────────
+  .mccv_folds <- reactive({ req(rv$mccv_results); rv$mccv_results$folds })
+  .dt <- function(df, page = 15, dom = "ftp")
+    datatable(df, options = list(pageLength = page, dom = dom, scrollX = TRUE),
+              rownames = FALSE, class = "compact stripe")
+
+  output$rra_group_table <- renderDT({
+    tb <- gsmR:::gsm_tbl_group_rra(.mccv_folds())
+    validate(need(!is.null(tb), "Run Parallel MCCV (≥ 2 iterations) to compute RRA over groups."))
+    .dt(tb)
+  })
+  output$rra_feature_table <- renderDT({
+    tb <- gsmR:::gsm_tbl_feature_rra(.mccv_folds())
+    validate(need(!is.null(tb), "RRA over genes needs Random Forest importance from MCCV folds."))
+    .dt(tb)
+  })
+  output$ranked_features_table <- renderDT({
+    tb <- gsmR:::gsm_tbl_ranked_features(.mccv_folds(), rv$dataset)
+    validate(need(!is.null(tb), "No ranked features yet."))
+    .dt(tb)
+  })
+  output$iter_metrics_table <- renderDT({
+    tb <- gsmR:::gsm_tbl_iteration_metrics(.mccv_folds())
+    validate(need(!is.null(tb), "No iterations yet."))
+    .dt(tb)
+  })
+  output$iter_accum_table <- renderDT({
+    tb <- gsmR:::gsm_tbl_iteration_accumulative(.mccv_folds())
+    validate(need(!is.null(tb), "No iterations yet."))
+    .dt(tb)
+  })
+  output$iter_accum_table_single <- renderDT({
+    req(rv$accumulative)
+    .dt(rv$accumulative, dom = "tp")
+  })
+  output$single_feature_table <- renderDT({
+    req(rv$final_model)
+    feats <- rv$final_model$features %||% character(0)
+    validate(need(length(feats) > 0, "No features in the model."))
+    imp <- rv$final_model$importance
+    df <- data.frame(
+      Gene = feats,
+      Importance = if (!is.null(imp)) round(as.numeric(imp[feats]), 5) else NA_real_,
+      stringsAsFactors = FALSE)
+    if (!all(is.na(df$Importance))) df <- df[order(-df$Importance), ]
+    .dt(df)
+  })
+
   output$mccv_stability_table <- renderDT({
     req(rv$mccv_results)
     mccv_res <- rv$mccv_results
