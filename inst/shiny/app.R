@@ -589,6 +589,50 @@ ui <- page_navbar(
             )
           ),
 
+          # ── Discover: de novo robust gene-module discovery (G-S-M detect) ──
+          nav_panel(
+            title = "\U0001F30B Discover",
+            conditionalPanel(
+              condition = "input.run_mccv_mode",
+              card(
+                card_header("De novo robust gene-module discovery"),
+                tags$small(class = "text-muted",
+                           "Infers stable gene modules from the per-iteration ranked gene lists, then annotates them against your known groups (rediscovered / fragment / novel)."),
+                layout_columns(
+                  col_widths = c(3, 2, 2, 2, 3),
+                  radioButtons("detect_mode", "Direction",
+                               c("Absolute" = "abs", "Up" = "up", "Down" = "down"),
+                               selected = "abs", inline = TRUE),
+                  numericInput("detect_top_genes", "Top genes", 200, 20, 2000, 10),
+                  numericInput("detect_min_freq", "Min frequency", 0.5, 0, 1, 0.05),
+                  numericInput("detect_resolution", "Resolution", 1, 0.1, 5, 0.1),
+                  numericInput("detect_nboot", "Bootstraps", 50, 0, 200, 10)
+                ),
+                actionButton("run_detect", "\U0001F30B Discover robust groups",
+                             class = "btn-primary")
+              ),
+              uiOutput("detect_status"),
+              layout_columns(
+                col_widths = c(6, 6),
+                card(card_header("Robust genes (RRA + stability)"),
+                     DTOutput("detect_robust_table")),
+                card(card_header("Gene–gene stability network"),
+                     plotOutput("detect_network", height = "360px"))
+              ),
+              card(card_header("Discovered modules vs. known groups"),
+                   DTOutput("detect_modules_table")),
+              card(card_header("Module detail (core / supporting / discarded)"),
+                   selectInput("detect_module_pick", "Module", choices = NULL),
+                   DTOutput("detect_module_detail"))
+            ),
+            conditionalPanel(
+              condition = "!input.run_mccv_mode",
+              tags$div(style = "padding:40px; opacity:0.6;",
+                       "De novo discovery aggregates many iterations — run ",
+                       tags$b("Parallel MCCV"), " first, then come back here.")
+            )
+          ),
+
           # ── Iterations: per-iteration detail (MCCV) ────────────────────
           nav_panel(
             title = "\U0001F501 Iterations",
@@ -674,7 +718,8 @@ server <- function(input, output, session) {
 
     # Score
     score_results = NULL,
-    scored        = FALSE
+    scored        = FALSE,
+    detect        = NULL
   )
 
   # Chunked pre-scoring worker state (drives the live main-panel view).
@@ -1793,12 +1838,91 @@ server <- function(input, output, session) {
   # Assemble the in-memory result object for the export functions.
   assemble_result <- reactive({
     if (isTRUE(input$run_mccv_mode)) {
-      req(rv$mccv_results); rv$mccv_results
+      req(rv$mccv_results)
+      res <- rv$mccv_results
+      if (!is.null(rv$detect)) res$detect <- rv$detect   # include discovered modules
+      res
     } else {
       req(rv$score_results, rv$final_model)
       list(score_results = rv$score_results, final_model = rv$final_model)
     }
   })
+
+  # ── G-S-M detect: de novo module discovery (on demand) ──────────────────
+  observeEvent(input$run_detect, {
+    req(rv$mccv_results, rv$dataset)
+    tryCatch(
+      withProgress(message = "Discovering robust gene modules…", value = 0.3, {
+        rv$detect <- gsm_detect(
+          rv$mccv_results, rv$dataset, mode = input$detect_mode,
+          top_genes = input$detect_top_genes, min_freq = input$detect_min_freq,
+          resolution = input$detect_resolution, n_boot = input$detect_nboot,
+          seed = 1)
+        setProgress(1, detail = "Done")
+        updateSelectInput(session, "detect_module_pick",
+                          choices = rv$detect$modules$Module)
+        showNotification(sprintf("🌋 Discovered %d modules from %d robust genes.",
+                                 nrow(rv$detect$modules), rv$detect$params$n_robust),
+                         type = "message")
+      }),
+      error = function(e) {
+        rv$detect <- NULL
+        showNotification(paste("❌ Discovery failed:", conditionMessage(e)),
+                         type = "error", duration = 12)
+      })
+  })
+
+  output$detect_status <- renderUI({
+    req(rv$detect)
+    p <- rv$detect$params
+    has_mods <- nrow(rv$detect$modules) > 0
+    tags$div(class = "value-box",
+      style = sprintf("background: %s; border-left:4px solid %s;",
+                      if (has_mods) "rgba(106,168,79,0.12)" else "rgba(241,194,50,0.12)",
+                      if (has_mods) "#6aa84f" else "#f1c232"),
+      tags$div(style = "font-weight:600;",
+               sprintf("%s %d modules · %d robust genes · mode = %s · %d iterations",
+                       if (has_mods) "✅" else "⚠️",
+                       nrow(rv$detect$modules), p$n_robust, p$mode, p$n_runs)),
+      if (!is.null(p$note)) tags$div(class = "label", p$note),
+      if (isTRUE(p$truncated))
+        tags$div(class = "label",
+                 sprintf("Graph capped to top %d genes.", p$top_genes)))
+  })
+
+  output$detect_robust_table <- renderDT({ req(rv$detect); .dt(rv$detect$robust_genes) })
+  output$detect_modules_table <- renderDT({
+    req(rv$detect)
+    validate(need(nrow(rv$detect$modules) > 0,
+                  "No multi-gene modules — see the note above."))
+    .dt(rv$detect$modules) |>
+      formatStyle("Label",
+                  backgroundColor = styleEqual(
+                    c("rediscovered", "fragment", "novel"),
+                    c("rgba(106,168,79,0.25)", "rgba(241,194,50,0.25)",
+                      "rgba(224,102,102,0.25)")))
+  })
+  output$detect_module_detail <- renderDT({
+    req(rv$detect, input$detect_module_pick)
+    m <- rv$detect$members
+    .dt(m[m$Module == input$detect_module_pick, , drop = FALSE], dom = "tp")
+  })
+  output$detect_network <- renderPlot({
+    req(rv$detect)
+    validate(need(requireNamespace("igraph", quietly = TRUE),
+                  "Install the 'igraph' package to view the network."))
+    adj <- rv$detect$graph$adjacency
+    memb <- rv$detect$graph$membership
+    validate(need(nrow(adj) >= 2 && sum(adj) > 0, "Network has no edges to draw."))
+    g <- igraph::graph_from_adjacency_matrix(adj, mode = "undirected",
+                                             weighted = TRUE, diag = FALSE)
+    cols <- grDevices::hcl.colors(max(memb), "Dark 3")[memb[igraph::V(g)$name]]
+    par(bg = "transparent", mar = c(0, 0, 0, 0))
+    plot(g, vertex.color = cols, vertex.size = 10, vertex.label.cex = 0.7,
+         vertex.label.color = "#dddddd", vertex.frame.color = NA,
+         edge.color = grDevices::adjustcolor("#4a90d9", 0.4),
+         edge.width = 1 + 4 * (igraph::E(g)$weight / max(igraph::E(g)$weight)))
+  }, bg = "transparent")
 
   output$export_note <- renderUI({
     req(rv$scored)
