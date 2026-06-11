@@ -109,6 +109,8 @@ library(gsmR)
 run_app()
 ```
 
+To host the dashboard **always-on** (Docker, Hugging Face Spaces, Cloud Run, or shinyapps.io), see [DEPLOY.md](DEPLOY.md).
+
 ### Dashboard Tabs Overview
 
 1. **📂 Data Tab**: Upload your expression matrix and prior biological knowledge files. Instantaneously explores class distributions and group sizes with clean charts.

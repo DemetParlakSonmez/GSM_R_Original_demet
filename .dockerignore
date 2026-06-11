@@ -1,0 +1,14 @@
+.git
+.gitignore
+.Rproj.user
+.Rhistory
+.RData
+*.Rcheck/
+*.tar.gz
+src/*.o
+src/*.so
+src/*.dll
+.DS_Store
+Thumbs.db
+.claude/
+gsm_outputs/
