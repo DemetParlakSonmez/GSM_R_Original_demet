@@ -357,6 +357,12 @@ gsm_export_tables <- function(result, dataset, summary = NULL, top_n = 10) {
     RankedFeatures        = gsm_tbl_ranked_features(folds, dataset),
     FeatureRRA            = gsm_tbl_feature_rra(folds)
   )
+  # De novo discovery results, when a gsm_detect() run is attached.
+  if (!is.null(result$detect)) {
+    tbls$RobustGenes           <- result$detect$robust_genes
+    tbls$DiscoveredModules     <- result$detect$modules
+    tbls$DiscoveredModuleGenes <- result$detect$members
+  }
   # Drop tables that are empty/NULL (e.g. pre-scores absent for method "none").
   Filter(function(x) !is.null(x) && nrow(x) > 0, tbls)
 }
@@ -401,6 +407,9 @@ gsm_write_xlsx <- function(tables, file) {
   PreScoreSignificance  = "PreScoreSignificance",
   RankedFeatures        = "rankedFeatures",
   FeatureRRA            = "rankedFeatures_by_RRA",
+  RobustGenes           = "Detect_RobustGenes",
+  DiscoveredModules     = "Detect_DiscoveredModules",
+  DiscoveredModuleGenes = "Detect_ModuleGenes",
   Accumulative          = "res1_Accumulative",
   FinalMetrics          = "FinalMetrics",
   GroupScores           = "GroupScores",

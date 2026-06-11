@@ -96,7 +96,12 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
       ranked_groups = ranked,
       group_accuracies = scores,                   # train-only mean-F1 ranking scores
       pre_scores = pre_sc,                         # sorted ANOVA scores (all groups)
-      importance = best_model$importance           # per-gene RF importance @ best k
+      importance = best_model$importance,          # per-gene RF importance @ best k
+      # Signed training Welch-t over the group-gene universe, for G-S-M detect
+      # (de novo module discovery); classifier-independent, no leakage.
+      gene_stats = gene_signed_stats(
+        expr_use, dataset$labels, split$train,
+        universe = intersect(unique(unlist(dataset$groups)), keep_genes))
     )
   }, error = function(e) {
     list(fold = fold, status = "error", error_message = conditionMessage(e))

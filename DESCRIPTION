@@ -28,6 +28,8 @@ Suggests:
     testthat (>= 3.0.0),
     randomForest,
     RobustRankAggreg,
+    igraph,
+    Matrix,
     e1071,
     caret,
     shiny,

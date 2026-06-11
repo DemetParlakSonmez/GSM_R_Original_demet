@@ -22,28 +22,56 @@ NULL
 #' @export
 shave_genes <- function(expr, labels, train_idx, alpha = 0.05) {
   genes <- rownames(expr)
-  y <- droplevels(labels[train_idx])
-  if (nlevels(y) != 2) return(genes)             # t-test needs two classes
+  wt <- welch_t_vector(expr, labels, train_idx)
+  if (is.null(wt)) return(genes)                 # not two-class / too few samples
 
+  p <- 2 * stats::pt(-abs(wt$t), df = wt$df)
+  p[!is.finite(wt$t) | !is.finite(wt$df)] <- 1   # constant genes -> not significant
+  p_adj <- stats::p.adjust(p, method = "BH")
+  keep <- genes[is.finite(p_adj) & p_adj < alpha]
+  if (length(keep) < 2) genes else keep          # safe fallback
+}
+
+# Vectorised two-class Welch t-test on the training columns.
+# Returns list(t, df) named by gene, or NULL when not two-class / <2 per class.
+welch_t_vector <- function(expr, labels, train_idx, genes = NULL) {
+  if (!is.null(genes)) {
+    genes <- intersect(genes, rownames(expr))
+    if (length(genes) == 0) return(NULL)
+    expr <- expr[genes, , drop = FALSE]
+  }
+  y <- droplevels(labels[train_idx])
+  if (nlevels(y) != 2) return(NULL)
   m <- expr[, train_idx, drop = FALSE]
   lev <- levels(y)
   a <- m[, y == lev[1], drop = FALSE]
   b <- m[, y == lev[2], drop = FALSE]
   na <- ncol(a); nb <- ncol(b)
-  if (na < 2 || nb < 2) return(genes)
-
+  if (na < 2 || nb < 2) return(NULL)
   ma <- rowMeans(a); mb <- rowMeans(b)
   va <- matrixStats_rowVars(a); vb <- matrixStats_rowVars(b)
   se2 <- va / na + vb / nb
-  t <- (ma - mb) / sqrt(se2)
-  # Welch-Satterthwaite degrees of freedom (per gene).
+  t  <- (ma - mb) / sqrt(se2)                    # signed (class1 - class2)
   df <- se2^2 / ((va / na)^2 / (na - 1) + (vb / nb)^2 / (nb - 1))
-  p <- 2 * stats::pt(-abs(t), df = df)
-  p[!is.finite(t) | !is.finite(df)] <- 1        # constant genes -> not significant
+  list(t = stats::setNames(t, rownames(m)), df = df)
+}
 
-  p_adj <- stats::p.adjust(p, method = "BH")
-  keep <- genes[is.finite(p_adj) & p_adj < alpha]
-  if (length(keep) < 2) genes else keep          # safe fallback
+#' Signed per-gene training statistic for direction-aware discovery
+#'
+#' Named signed Welch t-statistic (class1 − class2) over a bounded gene
+#' universe, computed on the training partition only. Drives the UP/DOWN/ABS
+#' modes of [gsm_detect()].
+#'
+#' @param expr Numeric matrix (genes x samples).
+#' @param labels Factor of class labels (two levels used).
+#' @param train_idx Integer training sample indices.
+#' @param universe Optional character vector restricting the genes.
+#' @return Named numeric signed t-statistic, or `NULL` if not two-class.
+#' @export
+gene_signed_stats <- function(expr, labels, train_idx, universe = NULL) {
+  wt <- welch_t_vector(expr, labels, train_idx, genes = universe)
+  if (is.null(wt)) return(NULL)
+  wt$t[is.finite(wt$t)]
 }
 
 # Per-row variance without a hard matrixStats dependency.
