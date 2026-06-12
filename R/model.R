@@ -36,7 +36,8 @@ build_model <- function(expr, labels, top_groups, train_idx,
     rf  = build_model_rf,
     svm = build_model_svm,
     knn = build_model_knn,
-    stop("Unknown modeling method: '", method, "'. Available: 'rf', 'svm', 'knn'.")
+    xgb = build_model_xgb,
+    stop("Unknown modeling method: '", method, "'. Available: 'rf', 'svm', 'knn', 'xgb'.")
   )
   fn(expr, labels, top_groups, train_idx, ...)
 }
@@ -188,13 +189,23 @@ build_model_svm <- function(expr, labels, top_groups, train_idx, ...) {
   # Metrics
   metrics <- calc_all_metrics(test_labels, predictions, positive_class, prob = prob_pos)
 
+  # Per-gene importance is well-defined only for the LINEAR kernel, where the
+  # decision function is w·x + b and |w_g| measures gene g's contribution.
+  # e1071 encodes the kernel as an integer (0 = linear). w = t(coefs) %*% SV.
+  importance <- tryCatch({
+    if (identical(as.integer(model$kernel), 0L)) {
+      w <- as.numeric(t(model$coefs) %*% model$SV)
+      stats::setNames(abs(w), colnames(model$SV))[all_genes]
+    } else NULL
+  }, error = function(e) NULL)
+
   list(
     metrics     = metrics,
     predictions = predictions,
     actual      = test_labels,
     features    = all_genes,
     n_groups    = length(top_groups),
-    importance  = NULL
+    importance  = importance
   )
 }
 
@@ -268,6 +279,68 @@ build_model_knn <- function(expr, labels, top_groups, train_idx, ...) {
     features    = all_genes,
     n_groups    = length(top_groups),
     importance  = NULL
+  )
+}
+
+
+#' Build an XGBoost model from top groups
+#'
+#' Combines the genes of the top-k groups and trains a binary gradient-boosted
+#' tree classifier. Returns per-gene importance (XGBoost `Gain`), enabling the
+#' consensus biomarker ranking in [gsm_biomarkers()]. Two-class problems only.
+#'
+#' @param expr Numeric matrix (genes x samples).
+#' @param labels Factor of class labels.
+#' @param top_groups Named list of character vectors.
+#' @param train_idx Integer vector of training sample indices.
+#' @param ... Additional arguments forwarded to [xgboost::xgboost()].
+#' @return A list with `metrics`, `predictions`, `actual`, `features`,
+#'   `n_groups`, and `importance` (per-gene Gain, named by gene).
+#' @keywords internal
+build_model_xgb <- function(expr, labels, top_groups, train_idx, ...) {
+  test_idx <- setdiff(seq_len(ncol(expr)), train_idx)
+  if (length(test_idx) == 0) stop("No test samples.")
+
+  all_genes <- intersect(unique(unlist(top_groups)), rownames(expr))
+  if (length(all_genes) == 0) {
+    return(list(
+      metrics     = calc_all_metrics(labels[test_idx], labels[test_idx]),
+      predictions = factor(rep(NA, length(test_idx)), levels = levels(labels)),
+      actual      = labels[test_idx],
+      features    = character(0),
+      n_groups    = length(top_groups),
+      importance  = NULL
+    ))
+  }
+
+  train_data <- t(expr[all_genes, train_idx, drop = FALSE])
+  test_data  <- t(expr[all_genes, test_idx, drop = FALSE])
+  test_labels <- labels[test_idx]
+  positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
+
+  res <- .xgb_fit(train_data, labels[train_idx], test_data, positive_class, ...)
+  predictions <- factor(ifelse(res$prob > 0.5, res$pos, res$neg),
+                        levels = levels(labels))
+  metrics <- calc_all_metrics(test_labels, predictions, positive_class, prob = res$prob)
+
+  # Per-gene importance (Gain), always named by gene. Genes the model never
+  # split on are absent from xgb.importance(); leave them NA (not 0) so
+  # gsm_biomarkers() treats them as not selected by this fold.
+  importance <- tryCatch({
+    im <- xgboost::xgb.importance(model = res$fit)
+    gain <- stats::setNames(rep(NA_real_, length(all_genes)), all_genes)
+    hit <- intersect(im$Feature, all_genes)
+    gain[hit] <- im$Gain[match(hit, im$Feature)]
+    gain
+  }, error = function(e) NULL)
+
+  list(
+    metrics     = metrics,
+    predictions = predictions,
+    actual      = test_labels,
+    features    = all_genes,
+    n_groups    = length(top_groups),
+    importance  = importance
   )
 }
 

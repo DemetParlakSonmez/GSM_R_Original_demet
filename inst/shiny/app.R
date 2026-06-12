@@ -304,7 +304,9 @@ ui <- page_navbar(
         title = "Pre-Scoring Settings",
         width = 340,
         selectInput("prescore_method", "Method",
-                    choices = c("ANOVA" = "anova", "None" = "none")),
+                    choices = c("ANOVA" = "anova",
+                                "limma (moderated)" = "limma",
+                                "None" = "none")),
         sliderInput("top_percent", "Top % groups to keep",
                     min = 5, max = 100, value = 20, step = 5),
         sliderInput("train_ratio", "Training ratio",
@@ -321,7 +323,20 @@ ui <- page_navbar(
         ),
         tags$hr(),
         actionButton("btn_prescore", "\U0001F4CA Run Pre-Scoring",
-                     class = "btn-primary btn-lg w-100")
+                     class = "btn-primary btn-lg w-100"),
+        tags$hr(),
+        tags$strong("\U0001F3B2 Group significance (permutation)"),
+        tags$small(class = "text-muted d-block mb-2",
+                   "Is each group better than a random gene set of the same size? Reports an empirical p-value + BH FDR."),
+        selectInput("perm_method", "Classifier",
+                    choices = c("Random Forest" = "rf",
+                                "Support Vector Machine" = "svm",
+                                "K-Nearest Neighbors" = "knn",
+                                "XGBoost" = "xgb")),
+        numericInput("perm_nperm", "Permutations per group",
+                     value = 200, min = 20, max = 2000, step = 20),
+        actionButton("btn_permtest", "\U0001F3B2 Test group significance",
+                     class = "btn-outline-light w-100")
       ),
       # ── Live view while pre-scoring is running ─────────────────────────
       conditionalPanel(
@@ -369,6 +384,15 @@ ui <- page_navbar(
         )
       ),
       conditionalPanel(
+        condition = "output.permtest_done",
+        card(
+          card_header("\U0001F3B2 Empirical group significance (permutation p-value + BH FDR)"),
+          tags$small(class = "text-muted",
+                     "observed = train-only mean F1; null_mean = mean over random same-size gene sets; p_adj = BH-FDR across tested groups."),
+          DTOutput("permtest_table")
+        )
+      ),
+      conditionalPanel(
         condition = "!output.prescore_done && !output.prescore_running",
         tags$div(
           style = "text-align:center; padding:80px 20px; opacity:0.5;",
@@ -390,7 +414,8 @@ ui <- page_navbar(
         selectInput("score_method", "Classifier",
                     choices = c("Random Forest" = "rf",
                                 "Support Vector Machine" = "svm",
-                                "K-Nearest Neighbors" = "knn")),
+                                "K-Nearest Neighbors" = "knn",
+                                "XGBoost" = "xgb")),
         
         # Hyperparameters for Random Forest
         conditionalPanel(
@@ -453,7 +478,8 @@ ui <- page_navbar(
                       choices = c("Same as Scoring" = "same",
                                   "Random Forest" = "rf",
                                   "Support Vector Machine" = "svm",
-                                  "K-Nearest Neighbors" = "knn"),
+                                  "K-Nearest Neighbors" = "knn",
+                                  "XGBoost" = "xgb"),
                       selected = "same"),
           sliderInput("mccv_train_ratio", "Training Ratio", min = 0.5, max = 0.9, value = 0.7, step = 0.05)
         ),
@@ -577,7 +603,11 @@ ui <- page_navbar(
             title = "\U0001F9EC Genes",
             conditionalPanel(
               condition = "input.run_mccv_mode",
-              card(card_header("\U0001F3C5 Robust Rank Aggregation — genes over iterations (RF importance)"),
+              card(card_header("\U0001F9EA Consensus biomarkers (selection frequency × mean importance + RRA)"),
+                   tags$small(class = "text-muted",
+                              "gsm_biomarkers(): one stability-weighted gene ranking across folds. Needs per-gene importance (RF, linear-kernel SVM, or XGBoost)."),
+                   DTOutput("biomarker_table")),
+              card(card_header("\U0001F3C5 Robust Rank Aggregation — genes over iterations (model importance)"),
                    DTOutput("rra_feature_table")),
               card(card_header("Ranked features (importance + selection frequency)"),
                    DTOutput("ranked_features_table"))
@@ -719,7 +749,10 @@ server <- function(input, output, session) {
     # Score
     score_results = NULL,
     scored        = FALSE,
-    detect        = NULL
+    detect        = NULL,
+
+    # Group significance (permutation test)
+    permtest      = NULL
   )
 
   # Chunked pre-scoring worker state (drives the live main-panel view).
@@ -743,12 +776,14 @@ server <- function(input, output, session) {
   output$prescore_running <- reactive(isTRUE(ps$active))
   output$score_done      <- reactive(rv$scored)
   output$mccv_running    <- reactive(isTRUE(mc$active))
+  output$permtest_done   <- reactive(!is.null(rv$permtest))
   outputOptions(output, "data_loaded",      suspendWhenHidden = FALSE)
   outputOptions(output, "collapse_done",    suspendWhenHidden = FALSE)
   outputOptions(output, "prescore_done",    suspendWhenHidden = FALSE)
   outputOptions(output, "prescore_running", suspendWhenHidden = FALSE)
   outputOptions(output, "score_done",       suspendWhenHidden = FALSE)
   outputOptions(output, "mccv_running",     suspendWhenHidden = FALSE)
+  outputOptions(output, "permtest_done",    suspendWhenHidden = FALSE)
 
   # ══════════════════════════════════════════════════════════════════════
   # Tab 1: Load Data
@@ -1353,6 +1388,11 @@ server <- function(input, output, session) {
                          type = "error", duration = 10)
         return()
       }
+      if (m == "xgb" && !requireNamespace("xgboost", quietly = TRUE)) {
+        showNotification("\u274C Package 'xgboost' required. Install with: install.packages('xgboost')",
+                         type = "error", duration = 10)
+        return()
+      }
     }
 
     # 2. Extract classifier arguments
@@ -1363,6 +1403,8 @@ server <- function(input, output, session) {
       score_args <- list(kernel = input$svm_kernel, cost = input$svm_cost, gamma = input$svm_gamma)
     } else if (input$score_method == "knn") {
       score_args <- list(k = input$knn_k)
+    } else if (input$score_method == "xgb") {
+      score_args <- list(nrounds = 100)
     }
 
     tryCatch({
@@ -1501,6 +1543,8 @@ server <- function(input, output, session) {
           model_args <- list(kernel = input$svm_kernel, cost = input$svm_cost, gamma = input$svm_gamma)
         } else if (m_method == "knn") {
           model_args <- list(k = input$knn_k)
+        } else if (m_method == "xgb") {
+          model_args <- list(nrounds = 100)
         }
 
         # Scope: "all" groups => keep 100% in each fold's pre-scoring (no filter).
@@ -2120,6 +2164,55 @@ server <- function(input, output, session) {
     tb <- gsmR:::gsm_tbl_ranked_features(.mccv_folds(), rv$dataset)
     validate(need(!is.null(tb), "No ranked features yet."))
     .dt(tb)
+  })
+
+  # ── Consensus biomarkers (gsm_biomarkers) ──────────────────────────────
+  output$biomarker_table <- renderDT({
+    req(rv$mccv_results)
+    bm <- gsm_biomarkers(rv$mccv_results)
+    validate(need(!is.null(bm),
+                  "Consensus biomarkers need per-gene importance — run MCCV with Random Forest, linear-kernel SVM, or XGBoost scoring/modeling."))
+    .dt(bm)
+  })
+
+  # ── Group significance: permutation test (Pre-Score tab) ───────────────
+  observeEvent(input$btn_permtest, {
+    if (is.null(rv$dataset)) {
+      showNotification("⚠️ Load a dataset first.", type = "warning", duration = 6)
+      return()
+    }
+    m <- input$perm_method
+    need_pkg <- switch(m, rf = "randomForest", svm = "e1071",
+                       knn = "class", xgb = "xgboost", NULL)
+    if (!is.null(need_pkg) && !requireNamespace(need_pkg, quietly = TRUE)) {
+      showNotification(sprintf("❌ Package '%s' required for this classifier.", need_pkg),
+                       type = "error", duration = 10)
+      return()
+    }
+    sargs <- switch(m, rf = list(ntree = 100), xgb = list(nrounds = 100), list())
+    withProgress(message = "Permutation testing groups...", value = 0.05, {
+      res <- tryCatch(
+        permutation_test_groups(
+          rv$dataset, method = m, n_perm = input$perm_nperm,
+          score_args = sargs, seed = input$prescore_seed,
+          progress = function(i, n, g) setProgress(i / n, detail = g)),
+        error = function(e) {
+          showNotification(paste("Permutation test failed:", conditionMessage(e)),
+                           type = "error", duration = 12)
+          NULL
+        })
+      rv$permtest <- res
+    })
+    if (!is.null(rv$permtest))
+      showNotification("✅ Group significance computed.", type = "message", duration = 5)
+  })
+
+  output$permtest_table <- renderDT({
+    req(rv$permtest)
+    df <- rv$permtest
+    for (cl in intersect(c("observed", "null_mean", "p_value", "p_adj"), names(df)))
+      df[[cl]] <- signif(df[[cl]], 3)
+    .dt(df)
   })
   output$iter_metrics_table <- renderDT({
     tb <- gsmR:::gsm_tbl_iteration_metrics(.mccv_folds())

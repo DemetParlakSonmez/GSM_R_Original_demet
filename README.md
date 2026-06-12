@@ -98,6 +98,37 @@ mccv_results <- run_mccv(
 print(mccv_results$metrics_summary)
 ```
 
+### 5. Empirical Significance of Groups (Permutation Test)
+Ask *"is this group better than a random gene set of the same size?"* — the question
+reviewers actually want answered. Reports an empirical p-value and BH-adjusted FDR:
+```r
+sig <- permutation_test_groups(
+  ds,
+  method     = "rf",
+  n_perm     = 200,        # random same-size gene sets per group
+  score_args = list(ntree = 100),
+  seed       = 42
+)
+head(sig)   # Group, size, observed, null_mean, p_value, p_adj, n_perm
+```
+
+### 6. Consensus Biomarker (Gene) Ranking
+Collapse the per-fold, per-gene model importances from an MCCV run into one
+stability-weighted biomarker list (selection frequency × mean importance, plus an
+RRA consensus). Works with RF, linear-kernel SVM, and XGBoost models:
+```r
+biomarkers <- gsm_biomarkers(mccv_results, top_n = 50)
+head(biomarkers)   # Gene, Frequency, MeanImportance, RRA_Score, Rank
+```
+
+### 7. Additional Backends
+- **XGBoost** gradient-boosted trees for scoring/modeling (`score_method`/`model_method = "xgb"`),
+  returning per-gene `Gain` importance and probabilities for AUC.
+- **limma** moderated-t / moderated-F pre-scoring (`pre_score_method = "limma"`),
+  more powerful than ANOVA at the small sample sizes typical of transcriptomics.
+- Probabilities are now wired through every classifier, so **AUC-ROC** is populated
+  for `score_group()` and `build_model()` (not just `NA`).
+
 ---
 
 ## Interactive Shiny GUI Dashboard

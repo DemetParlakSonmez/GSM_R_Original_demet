@@ -39,7 +39,8 @@ score_group <- function(expr, labels, genes, train_idx,
     rf  = score_group_rf,
     svm = score_group_svm,
     knn = score_group_knn,
-    stop("Unknown scoring method: '", method, "'. Available: 'rf', 'svm', 'knn'.")
+    xgb = score_group_xgb,
+    stop("Unknown scoring method: '", method, "'. Available: 'rf', 'svm', 'knn', 'xgb'.")
   )
   fn(expr, labels, genes, train_idx, ...)
 }
@@ -102,9 +103,45 @@ score_group_train <- function(expr, labels, genes, train_idx,
       stop("Package 'class' is required for method 'knn'.")
     kk <- list(...)$k %||% 3
     class::knn(train = x_tr, test = x_va, cl = y_tr, k = kk)
+  } else if (method == "xgb") {
+    res <- .xgb_fit(x_tr, y_tr, x_va, ...)
+    factor(ifelse(res$prob > 0.5, res$pos, res$neg), levels = levels(droplevels(y_tr)))
   } else {
     stop("Unknown scoring method: '", method, "'.")
   }
+}
+
+# Fit a binary XGBoost classifier and predict positive-class probabilities.
+# Shared by score_group_xgb(), .cv_predict(), and build_model_xgb(). Returns a
+# list(fit, prob = P(positive) on x_te, pos, neg, levels). Two-class only.
+.xgb_fit <- function(x_tr, y_tr, x_te, positive_class = NULL, ...) {
+  if (!requireNamespace("xgboost", quietly = TRUE)) {
+    stop("Package 'xgboost' is required for method 'xgb'. ",
+         "Install it with: install.packages('xgboost')")
+  }
+  y_tr <- droplevels(as.factor(y_tr))
+  lev <- levels(y_tr)
+  if (length(lev) != 2)
+    stop("method 'xgb' currently supports two-class problems only.")
+  if (is.null(positive_class) || !positive_class %in% lev)
+    positive_class <- if ("pos" %in% lev) "pos" else lev[length(lev)]
+  neg <- setdiff(lev, positive_class)
+  label <- as.integer(y_tr == positive_class)        # 1 = positive class
+
+  dots <- list(...)
+  nrounds <- dots$nrounds %||% 50L
+  params <- dots$params %||% list()
+  params$objective <- params$objective %||% "binary:logistic"
+  if (is.null(params$nthread)) params$nthread <- 1   # avoid nested parallelism in MCCV
+
+  # Use the stable low-level xgb.train/xgb.DMatrix API (the high-level
+  # xgboost() signature changed in 2.x). The DMatrix keeps the matrix column
+  # names, so xgb.importance() reports genes rather than f0/f1/...
+  dtrain <- xgboost::xgb.DMatrix(data = as.matrix(x_tr), label = label)
+  fit <- xgboost::xgb.train(params = params, data = dtrain,
+                            nrounds = nrounds, verbose = 0)
+  prob <- as.numeric(stats::predict(fit, as.matrix(x_te)))
+  list(fit = fit, prob = prob, pos = positive_class, neg = neg, levels = lev)
 }
 
 #' Stratified k-fold assignment (returns a list of validation-index vectors)
@@ -156,6 +193,8 @@ score_group_rf <- function(expr, labels, genes, train_idx, ...) {
   train_labels <- labels[train_idx]
   test_labels  <- labels[test_idx]
 
+  positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
+
   # Train Random Forest
   model <- randomForest::randomForest(
     x = train_data,
@@ -163,15 +202,19 @@ score_group_rf <- function(expr, labels, genes, train_idx, ...) {
     ...
   )
 
-  # Predict on test set
+  # Predict on test set (class + positive-class probability for AUC)
   predictions <- stats::predict(model, newdata = test_data)
-
-  # Calculate accuracy
-  accuracy <- calc_accuracy(test_labels, predictions)
+  prob_pos <- tryCatch({
+    pm <- stats::predict(model, newdata = test_data, type = "prob")
+    if (positive_class %in% colnames(pm)) pm[, positive_class] else NULL
+  }, error = function(e) NULL)
 
   list(
-    accuracy    = accuracy,
+    accuracy    = calc_accuracy(test_labels, predictions),
+    auc         = if (is.null(prob_pos)) NA_real_
+                  else calc_auc(test_labels, prob_pos, positive_class),
     predictions = predictions,
+    prob        = prob_pos,
     actual      = test_labels
   )
 }
@@ -203,22 +246,29 @@ score_group_svm <- function(expr, labels, genes, train_idx, ...) {
   train_labels <- labels[train_idx]
   test_labels  <- labels[test_idx]
 
-  # Train SVM
+  positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
+
+  # Train SVM (probability=TRUE enables positive-class probabilities for AUC)
   model <- e1071::svm(
     x = train_data,
     y = train_labels,
+    probability = TRUE,
     ...
   )
 
-  # Predict on test set
-  predictions <- stats::predict(model, newdata = test_data)
-
-  # Calculate accuracy
-  accuracy <- calc_accuracy(test_labels, predictions)
+  # Predict on test set (class + positive-class probability)
+  predictions <- stats::predict(model, newdata = test_data, probability = TRUE)
+  prob_pos <- tryCatch({
+    pm <- attr(predictions, "probabilities")
+    if (!is.null(pm) && positive_class %in% colnames(pm)) pm[, positive_class] else NULL
+  }, error = function(e) NULL)
 
   list(
-    accuracy    = accuracy,
+    accuracy    = calc_accuracy(test_labels, predictions),
+    auc         = if (is.null(prob_pos)) NA_real_
+                  else calc_auc(test_labels, prob_pos, positive_class),
     predictions = predictions,
+    prob        = prob_pos,
     actual      = test_labels
   )
 }
@@ -249,20 +299,63 @@ score_group_knn <- function(expr, labels, genes, train_idx, ...) {
   train_labels <- labels[train_idx]
   test_labels  <- labels[test_idx]
 
-  # Predict using KNN (class::knn)
+  positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
+
+  # Predict using KNN (prob=TRUE returns the winning-class vote proportion)
   predictions <- class::knn(
     train = train_data,
     test  = test_data,
     cl    = train_labels,
+    prob  = TRUE,
     ...
   )
-
-  # Calculate accuracy
-  accuracy <- calc_accuracy(test_labels, predictions)
+  prob_pos <- tryCatch({
+    pr <- attr(predictions, "prob")
+    if (is.null(pr)) NULL else ifelse(predictions == positive_class, pr, 1 - pr)
+  }, error = function(e) NULL)
 
   list(
-    accuracy    = accuracy,
+    accuracy    = calc_accuracy(test_labels, predictions),
+    auc         = if (is.null(prob_pos)) NA_real_
+                  else calc_auc(test_labels, prob_pos, positive_class),
     predictions = predictions,
+    prob        = prob_pos,
+    actual      = test_labels
+  )
+}
+
+
+#' Score a group using XGBoost (gradient-boosted trees)
+#'
+#' Trains a binary XGBoost classifier on the group's genes from the training
+#' samples and evaluates on the test samples. Two-class problems only.
+#'
+#' @param expr Numeric matrix (genes x samples).
+#' @param labels Factor of class labels.
+#' @param genes Character vector of gene names.
+#' @param train_idx Integer vector of training sample indices.
+#' @param ... Additional arguments forwarded to [xgboost::xgboost()] (e.g.
+#'   `nrounds`, or a `params` list with `max_depth`, `eta`, ...).
+#' @return A list with `accuracy`, `auc`, `predictions`, `prob`, and `actual`.
+#' @keywords internal
+score_group_xgb <- function(expr, labels, genes, train_idx, ...) {
+  test_idx <- setdiff(seq_len(ncol(expr)), train_idx)
+  if (length(test_idx) == 0) stop("No test samples.")
+
+  train_data <- t(expr[genes, train_idx, drop = FALSE])
+  test_data  <- t(expr[genes, test_idx, drop = FALSE])
+  test_labels <- labels[test_idx]
+  positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
+
+  res <- .xgb_fit(train_data, labels[train_idx], test_data, positive_class, ...)
+  predictions <- factor(ifelse(res$prob > 0.5, res$pos, res$neg),
+                        levels = levels(labels))
+
+  list(
+    accuracy    = calc_accuracy(test_labels, predictions),
+    auc         = calc_auc(test_labels, res$prob, positive_class),
+    predictions = predictions,
+    prob        = res$prob,
     actual      = test_labels
   )
 }
