@@ -31,6 +31,8 @@ Suggests:
     igraph,
     Matrix,
     e1071,
+    xgboost,
+    limma,
     caret,
     shiny,
     bslib,
