@@ -1,0 +1,133 @@
+#!/usr/bin/env Rscript
+# ==============================================================================
+# gsmR Command-Line Pipeline
+# ==============================================================================
+# Run the full G-S-M analysis from the terminal.
+#
+# Usage:
+#   gsmr params.yaml [options]
+#   Rscript -e 'gsmR::run_pipeline("params.yaml")'
+#
+# Options:
+#   --expr FILE         Override expression file
+#   --groups FILE       Override groups file
+#   --outdir DIR        Output directory (default: current directory)
+#   --method METHOD     Override score method (rf, svm, knn, xgb)
+#   --iterations N      Override MCCV iterations
+#   --cores N           Override number of CPU cores
+#   --no-discover       Skip module discovery step
+#   --no-mccv           Run single-fold instead of MCCV
+#   --help              Print this help message
+#
+# Examples:
+#   gsmr params.yaml
+#   gsmr params.yaml --expr new_data.csv --outdir results/
+#   gsmr params.yaml --method svm --iterations 20 --cores 4
+# ==============================================================================
+
+# Parse command-line arguments
+args <- commandArgs(trailingOnly = TRUE)
+
+if (length(args) == 0 || "--help" %in% args || "-h" %in% args) {
+  cat("
+gsmR Command-Line Pipeline
+===========================
+Run the full G-S-M analysis from the terminal.
+
+Usage:
+  gsmr params.yaml [options]
+
+Options:
+  --expr FILE         Override expression file path
+  --groups FILE       Override groups file path
+  --outdir DIR        Output directory (default: .)
+  --method METHOD     Score method: rf, svm, knn, xgb
+  --model METHOD      Model method: same, rf, svm, knn, xgb
+  --iterations N      MCCV iterations (default from YAML)
+  --cores N           CPU cores (default from YAML)
+  --top-percent N     Pre-score top percent (default from YAML)
+  --n-top N           Number of top groups for accumulative model
+  --seed N            Random seed
+  --no-discover       Skip module discovery
+  --no-mccv           Single-fold mode instead of MCCV
+  --help              Print this help message
+
+Examples:
+  gsmr params.yaml
+  gsmr params.yaml --expr new_data.csv --outdir results/
+  gsmr params.yaml --method svm --iterations 20 --cores 4
+")
+  quit(status = 0)
+}
+
+# First non-flag argument is the YAML file
+yaml_file <- NULL
+flags <- list()
+i <- 1
+while (i <= length(args)) {
+  a <- args[i]
+  if (a == "--expr" && i < length(args)) {
+    flags$expression_file <- args[i + 1]; i <- i + 2
+  } else if (a == "--groups" && i < length(args)) {
+    flags$groups_file <- args[i + 1]; i <- i + 2
+  } else if (a == "--outdir" && i < length(args)) {
+    flags$outdir <- args[i + 1]; i <- i + 2
+  } else if (a == "--method" && i < length(args)) {
+    flags$score_method <- args[i + 1]; i <- i + 2
+  } else if (a == "--model" && i < length(args)) {
+    flags$model_method <- args[i + 1]; i <- i + 2
+  } else if (a == "--iterations" && i < length(args)) {
+    flags$mccv_iterations <- as.integer(args[i + 1]); i <- i + 2
+  } else if (a == "--cores" && i < length(args)) {
+    flags$mccv_cores <- as.integer(args[i + 1]); i <- i + 2
+  } else if (a == "--top-percent" && i < length(args)) {
+    flags$top_percent <- as.numeric(args[i + 1]); i <- i + 2
+  } else if (a == "--n-top" && i < length(args)) {
+    flags$n_top_groups <- as.integer(args[i + 1]); i <- i + 2
+  } else if (a == "--seed" && i < length(args)) {
+    flags$score_seed <- as.integer(args[i + 1]); i <- i + 2
+  } else if (a == "--no-discover") {
+    flags$discover <- FALSE; i <- i + 1
+  } else if (a == "--no-mccv") {
+    flags$run_mccv_mode <- FALSE; i <- i + 1
+  } else if (!startsWith(a, "--") && is.null(yaml_file)) {
+    yaml_file <- a; i <- i + 1
+  } else {
+    cat("Unknown argument:", a, "\nUse --help for usage.\n")
+    quit(status = 1)
+  }
+}
+
+if (is.null(yaml_file)) {
+  cat("Error: No YAML parameter file specified.\nUsage: gsmr params.yaml [options]\n")
+  quit(status = 1)
+}
+
+# Load gsmR
+if (!requireNamespace("gsmR", quietly = TRUE)) {
+  # Dev mode: try to source from the package directory
+  pkg_root <- Sys.getenv("GSMR_DEV_ROOT", unset = "")
+  if (nzchar(pkg_root) && dir.exists(file.path(pkg_root, "R"))) {
+    for (f in list.files(file.path(pkg_root, "R"), pattern = "\\.R$", full.names = TRUE))
+      source(f, local = TRUE)
+    cat("Loaded gsmR in development mode from:", pkg_root, "\n")
+  } else {
+    stop("Package 'gsmR' is not installed. Install with: devtools::install() from the package root.")
+  }
+} else {
+  library(gsmR)
+}
+
+# Extract outdir and discover from flags (not YAML overrides)
+outdir <- flags$outdir %||% "."
+discover <- flags$discover %||% TRUE
+flags$outdir <- NULL
+flags$discover <- NULL
+
+# Run pipeline
+result <- do.call(gsmR::run_pipeline, c(
+  list(params = yaml_file, outdir = outdir, discover = discover),
+  flags
+))
+
+cat("\nDone. Results saved to:", result, "\n")

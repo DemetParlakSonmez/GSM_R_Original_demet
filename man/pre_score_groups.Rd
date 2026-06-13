@@ -18,7 +18,8 @@ pre_score_groups(
 
 \item{train_idx}{Integer vector of training sample indices.}
 
-\item{method}{Pre-scoring method. One of \code{"anova"} (default) or \code{"none"}.}
+\item{method}{Pre-scoring method. One of \code{"anova"} (default), \code{"limma"}, or
+\code{"none"}.}
 
 \item{top_percent}{Percentage of top groups to retain. Default \code{20}.}
 

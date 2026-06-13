@@ -23,7 +23,8 @@ Depends:
 Imports:
     data.table,
     stats,
-    utils
+    utils,
+    yaml
 Suggests:
     testthat (>= 3.0.0),
     randomForest,

@@ -9,7 +9,7 @@ pct_ci(x, probs = c(0.025, 0.975))
 \arguments{
 \item{x}{Numeric vector (e.g. a metric across MCCV iterations).}
 
-\item{probs}{Lower/upper probabilities (default 2.5\\% / 97.5\\%).}
+\item{probs}{Lower/upper probabilities (default 2.5 percent / 97.5 percent).}
 }
 \value{
 Named numeric \code{c(low, high)}; \code{NA}s if \code{x} has no finite values.

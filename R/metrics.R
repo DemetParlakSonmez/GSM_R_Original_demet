@@ -162,7 +162,7 @@ calc_auc <- function(actual, prob, positive_class = NULL) {
 #' Percentile confidence interval from a vector of repeated measurements
 #'
 #' @param x Numeric vector (e.g. a metric across MCCV iterations).
-#' @param probs Lower/upper probabilities (default 2.5\% / 97.5\%).
+#' @param probs Lower/upper probabilities (default 2.5 percent / 97.5 percent).
 #' @return Named numeric `c(low, high)`; `NA`s if `x` has no finite values.
 #' @export
 pct_ci <- function(x, probs = c(0.025, 0.975)) {

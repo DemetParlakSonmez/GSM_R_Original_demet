@@ -6,6 +6,9 @@ library(shiny)
 library(bslib)
 library(DT)
 
+# Increase maximum file upload size to 500MB
+options(shiny.maxRequestSize = 500 * 1024^2)
+
 # Load gsmR — either installed or via pkgload
 if (requireNamespace("gsmR", quietly = TRUE)) {
   library(gsmR)
@@ -78,10 +81,23 @@ format_duration <- function(secs) {
 time_banner_ui <- function(secs, label = "Completed in") {
   tags$div(
     class = "value-box",
-    style = "background: rgba(74,144,217,0.12); border-left: 4px solid #4a90d9;",
+    style = "background: rgba(74,144,217,0.12); border-left: 4px solid #4a90d9; position:relative;",
+    tags$button(type = "button", class = "btn-close",
+                style = "position:absolute; top:8px; right:8px; filter:invert(1); opacity:0.6;",
+                onclick = "this.parentElement.style.display='none';",
+                `aria-label` = "Close"),
     tags$div(style = "font-size:1.4rem; font-weight:600;",
              paste0("⏱️ ", format_duration(secs))),
     tags$div(class = "label", label)
+  )
+}
+
+# Inline help tooltip: gray circle with "?" that shows a popup on hover.
+help_tip <- function(text) {
+  tags$span(
+    class = "help-tip",
+    `data-tip` = text,
+    "?"
   )
 }
 
@@ -125,6 +141,9 @@ ui <- page_navbar(
       }
       .navbar-brand { color: #ffffff !important; font-size: 1.15rem; }
       .navbar-nav { gap: 4px; }
+      
+      /* Sidebar overflow visible for tooltips */
+      .sidebar { overflow: visible !important; }
 
       /* Tabs: clear, tactile, always legible — pill with an active accent. */
       .navbar-nav .nav-link {
@@ -156,6 +175,118 @@ ui <- page_navbar(
       .nav-ico { margin-right: 6px; font-size: 0.95rem; }
       /* Step connector arrows between tabs. */
       .nav-step-sep { color: rgba(255,255,255,0.25); align-self: center; padding: 0 2px; }
+
+      /* -- Help-tip circle -- */
+      .help-tip {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 18px; height: 18px; border-radius: 50%;
+        background: rgba(255,255,255,0.18); color: rgba(255,255,255,0.6);
+        font-size: 0.7rem; font-weight: 700; cursor: help;
+        flex-shrink: 0; margin-left: 4px; vertical-align: middle;
+        transition: background 0.15s;
+      }
+      .help-tip:hover { background: rgba(255,255,255,0.30); color: #fff; }
+      /* Tooltip popup styled by JS */
+      #help-tip-popup {
+        position: fixed; display: none;
+        background: #1e2235; color: #ddd;
+        font-size: 0.78rem; font-weight: 400;
+        padding: 8px 12px; border-radius: 8px;
+        max-width: 300px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        border: 1px solid rgba(255,255,255,0.12);
+        z-index: 99999; line-height: 1.4;
+        pointer-events: none;
+      }
+
+      /* -- visNetwork navigation buttons (dark theme override) -- */
+      .vis-button {
+        background-color: rgba(40,44,66,0.9) !important;
+        border: 1px solid rgba(255,255,255,0.25) !important;
+        border-radius: 6px !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.4) !important;
+        filter: grayscale(1) invert(1) brightness(1.5) !important;
+      }
+      .vis-button:hover {
+        background-color: rgba(74,144,217,0.5) !important;
+        border-color: #4a90d9 !important;
+        filter: grayscale(0) invert(1) brightness(2) !important;
+      }
+
+      /* -- visNetwork tooltip (dark theme) -- */
+      .vis-tooltip {
+        background: #1e2235 !important;
+        color: #e0e0e0 !important;
+        border: 1px solid rgba(255,255,255,0.15) !important;
+        border-radius: 8px !important;
+        padding: 8px 12px !important;
+        font-size: 0.85rem !important;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.5) !important;
+      }
+
+      /* -- Hide Shiny withProgress bar (the bottom-right overlay) -- */
+      .shiny-progress-container { display: none !important; }
+
+      /* -- Card fullscreen button: move to header bar -- */
+      .bslib-full-screen-enter {
+        position: absolute !important;
+        top: 6px !important; right: 8px !important;
+        bottom: auto !important;
+        opacity: 0.5; z-index: 10;
+        background: rgba(255,255,255,0.1) !important;
+        border: 1px solid rgba(255,255,255,0.2) !important;
+        border-radius: 4px !important;
+        padding: 2px 6px !important;
+        transition: opacity 0.15s;
+      }
+      .bslib-full-screen-enter:hover { opacity: 1; }
+      .card { position: relative; }
+    ")),
+    tags$div(id = "help-tip-popup"),
+    tags$script(HTML("
+      document.addEventListener('mouseover', function(e) {
+        var tip = e.target.closest('.help-tip');
+        var popup = document.getElementById('help-tip-popup');
+        if (!tip) { popup.style.display = 'none'; return; }
+        var text = tip.getAttribute('data-tip');
+        if (!text) return;
+        popup.textContent = text;
+        popup.style.display = 'block';
+        var r = tip.getBoundingClientRect();
+        var pw = popup.offsetWidth, ph = popup.offsetHeight;
+        var left = r.right + 8;
+        var top = r.top - ph / 2 + r.height / 2;
+        if (left + pw > window.innerWidth - 10) left = r.left - pw - 8;
+        if (top < 5) top = 5;
+        if (top + ph > window.innerHeight - 5) top = window.innerHeight - ph - 5;
+        popup.style.left = left + 'px';
+        popup.style.top = top + 'px';
+      });
+      document.addEventListener('mouseout', function(e) {
+        if (e.target.closest('.help-tip')) document.getElementById('help-tip-popup').style.display = 'none';
+      });
+
+      /* Button disable/enable helpers called from R via session$sendCustomMessage */
+      Shiny.addCustomMessageHandler('disableBtn', function(id) {
+        var btn = document.getElementById(id);
+        if (btn) { btn.disabled = true; btn.classList.add('disabled'); btn.style.opacity = '0.5'; }
+      });
+      Shiny.addCustomMessageHandler('enableBtn', function(id) {
+        var btn = document.getElementById(id);
+        if (btn) { btn.disabled = false; btn.classList.remove('disabled'); btn.style.opacity = '1'; }
+      });
+
+      /* Show an inline progress banner inside a Shiny output container */
+      Shiny.addCustomMessageHandler('showBanner', function(msg) {
+        var el = document.getElementById(msg.id);
+        if (el) {
+          el.innerHTML =
+            '<div class=value-box style=background:rgba(74,144,217,0.12);border-left:4px_solid_#4a90d9;padding:12px>' +
+            '<div style=font-weight:600;font-size:1.1rem>' + '\u23f3 ' + msg.title + '</div>' +
+            (msg.detail ? '<div style=margin-top:4px;opacity:0.7>' + msg.detail + '</div>' : '') +
+            '</div>';
+        }
+      });
     "))
   ),
 
@@ -167,28 +298,44 @@ ui <- page_navbar(
       sidebar = sidebar(
         title = "Upload Files",
         width = 340,
+        # -- Expression file --
         tags$div(
           class = "upload-area",
-          fileInput("expr_file", "\U0001F9EC Expression Data (CSV)",
-                    accept = c(".csv", ".tsv", ".txt")),
-          tags$small(class = "text-muted",
-                     "Samples as rows, first column = class labels")
+          tags$div(style = "display:flex; align-items:center; gap:4px; ",
+            tags$label("\U0001F9EC Expression Data"),
+            help_tip("CSV/TSV with samples as rows. First column = class labels (e.g. tumor/normal). All other columns = gene expression values.")
+          ),
+          fileInput("expr_file", NULL, accept = c(".csv", ".tsv", ".txt")),
+          uiOutput("expr_file_status")
         ),
         tags$hr(),
+        # -- Grouping file + options --
         tags$div(
           class = "upload-area",
-          fileInput("groups_file", "\U0001F5C2\uFE0F Grouping File",
-                    accept = c(".csv", ".tsv", ".gmt", ".txt")),
-          tags$small(class = "text-muted",
-                     "2-column CSV (gene, group) or GMT format")
+          tags$div(style = "display:flex; align-items:center; gap:4px; ",
+            tags$label("\U0001F5C2\uFE0F Grouping File"),
+            help_tip("2-column CSV (gene, group) or GMT format. Maps genes to functional groups (pathways, GO terms, etc.).")
+          ),
+          fileInput("groups_file", NULL, accept = c(".csv", ".tsv", ".gmt", ".txt")),
+          uiOutput("groups_file_status")
         ),
-        tags$hr(),
-        selectInput("groups_format", "Grouping format",
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Format", style = "margin:0;"),
+          help_tip("Auto-detect picks CSV or GMT based on file extension. Override if the wrong format is detected.")
+        ),
+        selectInput("groups_format", NULL,
                     choices = c("Auto-detect" = "auto",
                                 "2-column CSV" = "csv",
                                 "GMT" = "gmt")),
-        numericInput("min_group_size", "Min group size", value = 5, min = 1),
-        numericInput("max_group_size", "Max group size", value = 500, min = 10),
+        tags$div(style = "display:flex; align-items:center; gap:4px; margin-bottom:4px;",
+          tags$label("Group size filter", style = "margin:0;"),
+          help_tip("Groups smaller than Min or larger than Max are dropped. Keeps analysis focused on reasonably sized gene sets.")
+        ),
+        layout_columns(
+          col_widths = c(6, 6),
+          numericInput("min_group_size", "Min", value = 5, min = 1),
+          numericInput("max_group_size", "Max", value = 500, min = 10)
+        ),
         tags$hr(),
         actionButton("btn_load", "\U0001F680 Load & Validate",
                      class = "btn-primary btn-lg w-100"),
@@ -216,16 +363,16 @@ ui <- page_navbar(
         ),
         layout_columns(
           col_widths = c(6, 6),
-          card(
+          card(full_screen = TRUE,
             card_header("Class Distribution"),
             plotOutput("plot_class_dist", height = "260px")
           ),
-          card(
+          card(full_screen = TRUE,
             card_header("Group Size Distribution"),
             plotOutput("plot_group_sizes", height = "260px")
           )
         ),
-        card(
+        card(full_screen = TRUE,
           card_header("Expression Matrix Preview"),
           DTOutput("expr_preview")
         )
@@ -249,17 +396,33 @@ ui <- page_navbar(
       sidebar = sidebar(
         title = "Collapsing Settings",
         width = 340,
-        fileInput("meta_file", "\U0001F4CB Metadata (CSV)",
-                  accept = c(".csv", ".tsv", ".txt")),
-        tags$small(class = "text-muted",
-                   "Must include sample_id and replicate_group_id columns"),
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("\U0001F4CB Metadata (CSV)"),
+          help_tip("CSV with sample_id and replicate_group_id columns. Maps samples to their biological replicate groups for averaging.")
+        ),
+        fileInput("meta_file", NULL, accept = c(".csv", ".tsv", ".txt")),
         tags$hr(),
-        textInput("sample_id_col", "Sample ID column", value = "sample_id"),
-        textInput("replicate_group_col", "Replicate group column",
-                  value = "replicate_group_id"),
-        selectInput("collapse_method", "Aggregation method",
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Sample ID column"),
+          help_tip("Column name in the metadata that matches the row names in the expression data.")
+        ),
+        textInput("sample_id_col", NULL, value = "sample_id"),
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Replicate group column"),
+          help_tip("Column in metadata that defines which samples are replicates of each other.")
+        ),
+        textInput("replicate_group_col", NULL, value = "replicate_group_id"),
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Aggregation method"),
+          help_tip("How to combine replicate expression values. Mean is most common.")
+        ),
+        selectInput("collapse_method", NULL,
                     choices = c("mean", "median", "sum", "min", "max", "first")),
-        selectInput("meta_conflict", "Metadata conflict handling",
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Conflict handling"),
+          help_tip("What to do if replicates have different class labels. Error = stop, NA = set missing, concat = combine, first = keep first.")
+        ),
+        selectInput("meta_conflict", NULL,
                     choices = c("error", "NA", "concat", "first")),
         checkboxInput("keep_original", "Keep original samples", value = FALSE),
         tags$hr(),
@@ -303,15 +466,31 @@ ui <- page_navbar(
       sidebar = sidebar(
         title = "Pre-Scoring Settings",
         width = 340,
-        selectInput("prescore_method", "Method",
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Method"),
+          help_tip("Statistical test to rank groups by differential expression. ANOVA uses F-statistic, limma uses moderated t-tests. None skips pre-scoring.")
+        ),
+        selectInput("prescore_method", NULL,
                     choices = c("ANOVA" = "anova",
                                 "limma (moderated)" = "limma",
                                 "None" = "none")),
-        sliderInput("top_percent", "Top % groups to keep",
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Top % groups to keep"),
+          help_tip("Percentage of groups passing the pre-score filter. Lower = more selective, faster scoring. 20% is a good default.")
+        ),
+        sliderInput("top_percent", NULL,
                     min = 5, max = 100, value = 20, step = 5),
-        sliderInput("train_ratio", "Training ratio",
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Training ratio"),
+          help_tip("Fraction of samples used for training. The rest is held out for validation. 0.7 means 70% train, 30% test.")
+        ),
+        sliderInput("train_ratio", NULL,
                     min = 0.5, max = 0.9, value = 0.7, step = 0.05),
-        numericInput("prescore_seed", "Random seed", value = 44),
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Random seed"),
+          help_tip("Seed for reproducibility. Same seed = same train/test split.")
+        ),
+        numericInput("prescore_seed", NULL, value = 44),
         tags$hr(),
         checkboxInput("prescore_detail",
                       "Show detailed info (per-group scores + charts)",
@@ -326,8 +505,7 @@ ui <- page_navbar(
                      class = "btn-primary btn-lg w-100"),
         tags$hr(),
         tags$strong("\U0001F3B2 Group significance (permutation)"),
-        tags$small(class = "text-muted d-block mb-2",
-                   "Is each group better than a random gene set of the same size? Reports an empirical p-value + BH FDR."),
+        help_tip("Tests each group against random same-size gene sets. Reports empirical p-value + BH FDR."),
         selectInput("perm_method", "Classifier",
                     choices = c("Random Forest" = "rf",
                                 "Support Vector Machine" = "svm",
@@ -344,11 +522,11 @@ ui <- page_navbar(
         uiOutput("prescore_live_status"),
         layout_columns(
           col_widths = c(7, 5),
-          card(
+          card(full_screen = TRUE,
             card_header("Live: top groups so far"),
             plotOutput("plot_prescore_live", height = "340px")
           ),
-          card(
+          card(full_screen = TRUE,
             card_header("Live leaderboard (top 15 so far)"),
             tableOutput("prescore_live_table")
           )
@@ -368,24 +546,24 @@ ui <- page_navbar(
           condition = "input.prescore_detail && output.prescore_has_scores",
           layout_columns(
             col_widths = c(7, 5),
-            card(
+            card(full_screen = TRUE,
               card_header("Top Groups by Pre-Score (Fisher statistic)"),
               plotOutput("plot_prescore_bars", height = "320px")
             ),
-            card(
+            card(full_screen = TRUE,
               card_header("Score Distribution (all groups)"),
               plotOutput("plot_prescore_hist", height = "320px")
             )
           )
         ),
-        card(
+        card(full_screen = TRUE,
           card_header(textOutput("prescore_table_header", inline = TRUE)),
           DTOutput("prescore_table")
         )
       ),
       conditionalPanel(
         condition = "output.permtest_done",
-        card(
+        card(full_screen = TRUE,
           card_header("\U0001F3B2 Empirical group significance (permutation p-value + BH FDR)"),
           tags$small(class = "text-muted",
                      "observed = train-only mean F1; null_mean = mean over random same-size gene sets; p_adj = BH-FDR across tested groups."),
@@ -411,7 +589,11 @@ ui <- page_navbar(
       sidebar = sidebar(
         title = "Scoring Settings",
         width = 340,
-        selectInput("score_method", "Classifier",
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Classifier"),
+          help_tip("ML algorithm for group scoring. RF is robust and fast. SVM works well for small samples. KNN is simple. XGBoost for complex patterns.")
+        ),
+        selectInput("score_method", NULL,
                     choices = c("Random Forest" = "rf",
                                 "Support Vector Machine" = "svm",
                                 "K-Nearest Neighbors" = "knn",
@@ -443,9 +625,10 @@ ui <- page_navbar(
         ),
         
         # Phase I gene shaving: training-only Welch t-test + BH-FDR filter.
-        checkboxInput("shave_genes",
-                      "Gene shaving (Welch t-test + BH FDR, training only)",
-                      value = TRUE),
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          checkboxInput("shave_genes", "Gene shaving", value = TRUE),
+          help_tip("Remove non-significant genes per group using Welch t-test + BH FDR correction. Computed on training data only to avoid leakage.")
+        ),
         conditionalPanel(
           condition = "input.shave_genes",
           numericInput("fdr_alpha", "FDR threshold (alpha)",
@@ -454,19 +637,28 @@ ui <- page_navbar(
         checkboxInput("normalize_z",
                       "Z-score normalize (per-fold, train-fit)", value = FALSE),
 
-        radioButtons("score_scope", "Which groups to score",
-                     choices = c("Top pre-scored groups (recommended)" = "selected",
-                                 "All groups (skip pre-score filter)" = "all"),
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Groups to score"),
+          help_tip("Score only pre-filtered top groups (faster, recommended) or all groups (slower, exhaustive).")
+        ),
+        radioButtons("score_scope", NULL,
+                     choices = c("Top pre-scored (recommended)" = "selected",
+                                 "All groups" = "all"),
                      selected = "selected"),
         # Accumulative depth K: build models on top-1, top-1..2, ..., top-1..K
         # ranked groups and report performance at each level (both modes).
-        numericInput("n_top_groups",
-                     "Accumulative depth (top-K groups to model)",
-                     value = 10, min = 1),
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Accumulative depth (K)"),
+          help_tip("Build models using the top-1, top-2, ..., top-K ranked groups. Shows how performance changes as more groups are combined.")
+        ),
+        numericInput("n_top_groups", NULL, value = 10, min = 1),
         numericInput("score_seed", "Random seed", value = 44),
 
         tags$hr(),
-        checkboxInput("run_mccv_mode", "Run Multi-Fold Parallel MCCV?", value = FALSE),
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          checkboxInput("run_mccv_mode", "Multi-Fold MCCV", value = FALSE),
+          help_tip("Monte Carlo Cross-Validation: repeat the entire scoring pipeline across many random train/test splits for robust statistics.")
+        ),
         
         # Parallel MCCV options
         conditionalPanel(
@@ -500,23 +692,18 @@ ui <- page_navbar(
           col_widths = c(6, 6),
           card(
             card_header("Live: fold accuracy as folds complete"),
-            plotOutput("plot_mccv_live", height = "340px")
+            plotOutput("plot_mccv_live", height = "260px")
           ),
           card(
             card_header("Live: running metric averages"),
             uiOutput("mccv_live_means")
           )
-        ),
-        card(
-          card_header("Live: completed folds"),
-          tableOutput("mccv_live_table")
         )
       ),
 
       # Main Panel Results Conditional Displays
       conditionalPanel(
         condition = "output.score_done && !output.mccv_running",
-        uiOutput("time_score"),
 
         # ── Professional tabbed results dashboard ─────────────────────────
         navset_card_tab(
@@ -528,7 +715,7 @@ ui <- page_navbar(
             uiOutput("score_summary"),
             conditionalPanel(
               condition = "!input.run_mccv_mode",
-              card(
+              card(full_screen = TRUE,
                 card_header("Best-k joint model performance"),
                 layout_columns(col_widths = c(4, 4, 4),
                   uiOutput("model_vbox_acc"), uiOutput("model_vbox_kappa"),
@@ -540,7 +727,7 @@ ui <- page_navbar(
             ),
             conditionalPanel(
               condition = "input.run_mccv_mode",
-              card(
+              card(full_screen = TRUE,
                 card_header("Aggregate performance across folds (mean ± SD, 95% CI)"),
                 DTOutput("mccv_summary_table")
               )
@@ -550,7 +737,7 @@ ui <- page_navbar(
           # ── Performance: accumulative metric-vs-k curve ────────────────
           nav_panel(
             title = "\U0001F4C8 Performance",
-            card(
+            card(full_screen = TRUE,
               card_header("Accumulative performance: metric vs. number of top groups (k)"),
               layout_sidebar(
                 sidebar = sidebar(
@@ -568,7 +755,7 @@ ui <- page_navbar(
             ),
             conditionalPanel(
               condition = "input.run_mccv_mode",
-              card(
+              card(full_screen = TRUE,
                 card_header("Per-fold metric distribution"),
                 plotOutput("plot_mccv_folds", height = "320px")
               )
@@ -581,20 +768,20 @@ ui <- page_navbar(
             conditionalPanel(
               condition = "!input.run_mccv_mode",
               layout_columns(col_widths = c(7, 5),
-                card(card_header("Group scores (train-only F1, ranked)"),
+                card(full_screen = TRUE, card_header("Group scores (train-only F1, ranked)"),
                      DTOutput("score_table")),
-                card(card_header("Score distribution"),
+                card(full_screen = TRUE, card_header("Score distribution"),
                      plotOutput("plot_scores", height = "320px")))
             ),
             conditionalPanel(
               condition = "input.run_mccv_mode",
-              layout_columns(col_widths = c(6, 6),
-                card(card_header("Average group accuracy (top stable)"),
+              layout_columns(col_widths = c(4, 4, 4),
+                card(full_screen = TRUE, card_header("Average group accuracy (top stable)"),
                      plotOutput("plot_mccv_groups", height = "320px")),
-                card(card_header("\U0001F3C5 Robust Rank Aggregation — groups over iterations"),
-                     DTOutput("rra_group_table"))),
-              card(card_header("Group stability & accuracies (all scored groups)"),
-                   DTOutput("mccv_stability_table"))
+                card(full_screen = TRUE, card_header("\U0001F3C5 RRA — groups over iterations"),
+                     DTOutput("rra_group_table")),
+                card(full_screen = TRUE, card_header("Group stability & accuracies"),
+                     DTOutput("mccv_stability_table")))
             )
           ),
 
@@ -603,18 +790,19 @@ ui <- page_navbar(
             title = "\U0001F9EC Genes",
             conditionalPanel(
               condition = "input.run_mccv_mode",
-              card(card_header("\U0001F9EA Consensus biomarkers (selection frequency × mean importance + RRA)"),
-                   tags$small(class = "text-muted",
-                              "gsm_biomarkers(): one stability-weighted gene ranking across folds. Needs per-gene importance (RF, linear-kernel SVM, or XGBoost)."),
-                   DTOutput("biomarker_table")),
-              card(card_header("\U0001F3C5 Robust Rank Aggregation — genes over iterations (model importance)"),
-                   DTOutput("rra_feature_table")),
-              card(card_header("Ranked features (importance + selection frequency)"),
-                   DTOutput("ranked_features_table"))
+              layout_columns(col_widths = c(4, 4, 4),
+                card(full_screen = TRUE, card_header("\U0001F9EA Consensus biomarkers"),
+                     tags$small(class = "text-muted",
+                                "Selection freq × mean importance + RRA"),
+                     DTOutput("biomarker_table")),
+                card(full_screen = TRUE, card_header("\U0001F3C5 RRA — genes (importance)"),
+                     DTOutput("rra_feature_table")),
+                card(full_screen = TRUE, card_header("Ranked features"),
+                     DTOutput("ranked_features_table")))
             ),
             conditionalPanel(
               condition = "!input.run_mccv_mode",
-              card(card_header("Genes in the best-k joint model"),
+              card(full_screen = TRUE, card_header("Genes in the best-k joint model"),
                    DTOutput("single_feature_table"))
             )
           ),
@@ -624,36 +812,68 @@ ui <- page_navbar(
             title = "\U0001F30B Discover",
             conditionalPanel(
               condition = "input.run_mccv_mode",
-              card(
-                card_header("De novo robust gene-module discovery"),
-                tags$small(class = "text-muted",
-                           "Infers stable gene modules from the per-iteration ranked gene lists, then annotates them against your known groups (rediscovered / fragment / novel)."),
-                layout_columns(
-                  col_widths = c(3, 2, 2, 2, 3),
-                  radioButtons("detect_mode", "Direction",
+              layout_sidebar(
+                sidebar = sidebar(
+                  title = "Discovery Settings",
+                  width = 280, open = TRUE,
+                  tags$div(style = "display:flex; align-items:center; gap:4px;",
+                    tags$label("Direction"),
+                    help_tip("Which direction of differential expression to consider. Absolute = both up and down regulated genes.")
+                  ),
+                  radioButtons("detect_mode", NULL,
                                c("Absolute" = "abs", "Up" = "up", "Down" = "down"),
                                selected = "abs", inline = TRUE),
-                  numericInput("detect_top_genes", "Top genes", 200, 20, 2000, 10),
-                  numericInput("detect_min_freq", "Min frequency", 0.5, 0, 1, 0.05),
-                  numericInput("detect_resolution", "Resolution", 1, 0.1, 5, 0.1),
-                  numericInput("detect_nboot", "Bootstraps", 50, 0, 200, 10)
+                  tags$div(style = "display:flex; align-items:center; gap:4px;",
+                    tags$label("Top genes"),
+                    help_tip("Number of most differentially expressed genes to include in the stability network.")
+                  ),
+                  numericInput("detect_top_genes", NULL, 200, 20, 2000, 10),
+                  tags$div(style = "display:flex; align-items:center; gap:4px;",
+                    tags$label("Min frequency"),
+                    help_tip("Minimum fraction of MCCV folds a gene must appear in to be considered robust. Higher = more stringent.")
+                  ),
+                  numericInput("detect_min_freq", NULL, 0.5, 0, 1, 0.05),
+                  layout_columns(
+                    col_widths = c(6, 6),
+                    tags$div(
+                      tags$div(style = "display:flex; align-items:center; gap:4px;",
+                        tags$label("Resolution"),
+                        help_tip("Louvain clustering resolution. Higher = more, smaller modules.")
+                      ),
+                      numericInput("detect_resolution", NULL, 1, 0.1, 5, 0.1)
+                    ),
+                    tags$div(
+                      tags$div(style = "display:flex; align-items:center; gap:4px;",
+                        tags$label("Bootstraps"),
+                        help_tip("Number of bootstrap iterations for network stability estimation. 0 = skip bootstrap.")
+                      ),
+                      numericInput("detect_nboot", NULL, 50, 0, 200, 10)
+                    )
+                  ),
+                  actionButton("run_detect", "\U0001F30B Discover",
+                               class = "btn-primary btn-lg w-100")
                 ),
-                actionButton("run_detect", "\U0001F30B Discover robust groups",
-                             class = "btn-primary")
-              ),
-              uiOutput("detect_status"),
-              layout_columns(
-                col_widths = c(6, 6),
-                card(card_header("Robust genes (RRA + stability)"),
-                     DTOutput("detect_robust_table")),
-                card(card_header("Gene–gene stability network"),
-                     plotOutput("detect_network", height = "360px"))
-              ),
-              card(card_header("Discovered modules vs. known groups"),
-                   DTOutput("detect_modules_table")),
-              card(card_header("Module detail (core / supporting / discarded)"),
-                   selectInput("detect_module_pick", "Module", choices = NULL),
-                   DTOutput("detect_module_detail"))
+                uiOutput("detect_status"),
+                layout_columns(
+                  col_widths = c(6, 6),
+                  card(full_screen = TRUE,
+                    card_header("Robust genes (RRA + stability)"),
+                    DTOutput("detect_robust_table")),
+                  card(full_screen = TRUE,
+                    card_header("Gene–gene stability network"),
+                    visNetwork::visNetworkOutput("detect_network_vis", height = "360px"))
+                ),
+                layout_columns(
+                  col_widths = c(6, 6),
+                  card(full_screen = TRUE,
+                    card_header("Discovered modules vs. known groups"),
+                    DTOutput("detect_modules_table")),
+                  card(full_screen = TRUE,
+                    card_header("Module detail"),
+                    selectInput("detect_module_pick", "Module", choices = NULL),
+                    DTOutput("detect_module_detail"))
+                )
+              )
             ),
             conditionalPanel(
               condition = "!input.run_mccv_mode",
@@ -668,14 +888,14 @@ ui <- page_navbar(
             title = "\U0001F501 Iterations",
             conditionalPanel(
               condition = "input.run_mccv_mode",
-              card(card_header("Best-k model per iteration"),
+              card(full_screen = TRUE, card_header("Best-k model per iteration"),
                    DTOutput("iter_metrics_table")),
-              card(card_header("Accumulative performance — every iteration × k"),
+              card(full_screen = TRUE, card_header("Accumulative performance — every iteration × k"),
                    DTOutput("iter_accum_table"))
             ),
             conditionalPanel(
               condition = "!input.run_mccv_mode",
-              card(card_header("Accumulative performance (this split)"),
+              card(full_screen = TRUE, card_header("Accumulative performance (this split)"),
                    DTOutput("iter_accum_table_single"))
             )
           ),
@@ -709,6 +929,61 @@ ui <- page_navbar(
           style = "text-align:center; padding:80px 20px; opacity:0.5;",
           tags$h3("\U0001F3AF Run scoring or parallel MCCV analysis"),
           tags$p("Select your classifier and parameters, then click 'Run Analysis' to see results.")
+        )
+      )
+    )
+  ),
+
+  # ── Tab 5: File ────────────────────────────────────────────────────
+  nav_panel(
+    value = "file_menu",
+    title = nav_step_title("5", "📁", "File"),
+    card(
+      card_header("📝 Import & Export Parameters"),
+      tags$p("Save your current analysis parameters to a YAML file to share or reuse later, or load an existing configuration."),
+      layout_columns(
+        col_widths = c(6, 6),
+        card(
+          card_header("Import Parameters"),
+          fileInput("import_settings", "Upload YAML Settings", accept = c(".yaml", ".yml")),
+          uiOutput("import_settings_status")
+        ),
+        card(
+          card_header("Export Parameters"),
+          downloadButton("export_settings", "Download YAML Settings", class = "btn-primary w-100")
+        )
+      )
+    ),
+    card(
+      card_header("\U0001F4BE Save & Load Session"),
+      tags$p(class = "text-muted",
+             "Save the entire session (data, results, models, discovery) to a single file. ",
+             "Reload it later to restore all results without recalculating."),
+      layout_columns(
+        col_widths = c(6, 6),
+        card(
+          card_header("Load Session"),
+          fileInput("load_session_file", "Upload .rds Session File",
+                    accept = c(".rds", ".RDS")),
+          uiOutput("load_session_status")
+        ),
+        card(
+          card_header("Save Session"),
+          tags$div(style = "display:flex; gap:6px; align-items:end;",
+            tags$div(style = "flex:1;",
+              textInput("save_session_path", "Save to:",
+                        value = file.path(path.expand("~"), "Downloads",
+                                          paste0("gsmR_session_", format(Sys.time(), "%Y%m%d"), ".rds")))
+            ),
+            actionButton("btn_browse_save", "\U0001F4C2",
+                         class = "btn-outline-light", style = "margin-bottom:16px;")
+          ),
+          actionButton("btn_save_session", "\U0001F4BE Save Session",
+                       class = "btn-primary w-100"),
+          uiOutput("save_session_status"),
+          tags$small(class = "text-muted d-block mt-2",
+                     "Includes: expression data, groups, dataset, pre-score results, ",
+                     "scoring/MCCV results, models, discovery, and all settings.")
         )
       )
     )
@@ -790,10 +1065,89 @@ server <- function(input, output, session) {
   # ══════════════════════════════════════════════════════════════════════
   # Shared loader used by both the file upload and the example dataset buttons.
   load_into_rv <- function(expr_path, groups_path, groups_name, fmt) {
+    # Clear any previous file-validation status
+    output$expr_file_status <- renderUI(NULL)
+    output$groups_file_status <- renderUI(NULL)
+
     tryCatch({
-      withProgress(message = "Loading data...", value = 0.3, {
-        # Read expression
+      withProgress(message = "Loading data...", value = 0.1, {
+
+        # ── Quick-validate expression file ──────────────────────────────
+        expr_peek <- tryCatch(
+          data.table::fread(expr_path, nrows = 3, header = TRUE, check.names = FALSE),
+          error = function(e) NULL
+        )
+        if (is.null(expr_peek) || ncol(expr_peek) < 3) {
+          output$expr_file_status <- renderUI(
+            tags$div(class = "text-danger mt-1",
+                     style = "font-weight:600;",
+                     "\u274c Wrong file — expected an expression CSV with a 'class' column and gene columns.")
+          )
+          stop("Expression file does not look like a valid expression CSV. ",
+               "It should have a 'class' column followed by gene expression columns.")
+        }
+        if (!"class" %in% names(expr_peek)) {
+          # Check if it looks like a grouping file (2-col, gene+group style)
+          if (ncol(expr_peek) == 2) {
+            output$expr_file_status <- renderUI(
+              tags$div(class = "text-danger mt-1",
+                       style = "font-weight:600;",
+                       "\u274c Wrong file — this looks like a grouping file, not expression data. ",
+                       "Please upload it into the Grouping File box instead.")
+            )
+            stop("The uploaded expression file looks like a grouping file (2 columns: ",
+                 paste(names(expr_peek), collapse = ", "),
+                 "). Please swap the files.")
+          }
+          output$expr_file_status <- renderUI(
+            tags$div(class = "text-danger mt-1",
+                     style = "font-weight:600;",
+                     "\u274c Missing 'class' column. Found columns: ",
+                     paste(head(names(expr_peek), 5), collapse = ", "),
+                     if (ncol(expr_peek) > 5) "..." else "")
+          )
+          stop("Class column 'class' not found in expression file. ",
+               "Available columns: ", paste(head(names(expr_peek), 5), collapse = ", "), "...")
+        }
+        setProgress(0.2, detail = "Expression file OK...")
+
+        # ── Quick-validate grouping file ────────────────────────────────
+        grp_is_gmt <- (fmt == "gmt") ||
+                       (fmt == "auto" && tolower(tools::file_ext(groups_name)) == "gmt")
+
+        if (!grp_is_gmt) {
+          grp_peek <- tryCatch(
+            data.table::fread(groups_path, nrows = 3, header = TRUE, check.names = FALSE),
+            error = function(e) NULL
+          )
+          if (is.null(grp_peek) || ncol(grp_peek) < 2) {
+            output$groups_file_status <- renderUI(
+              tags$div(class = "text-danger mt-1",
+                       style = "font-weight:600;",
+                       "\u274c Wrong file — expected a 2-column grouping CSV (gene, group).")
+            )
+            stop("Grouping file does not look valid. ",
+                 "Expected at least 2 columns (gene, group).")
+          }
+          # Check if it looks like an expression file (has 'class' column + many cols)
+          if ("class" %in% names(grp_peek) && ncol(grp_peek) > 10) {
+            output$groups_file_status <- renderUI(
+              tags$div(class = "text-danger mt-1",
+                       style = "font-weight:600;",
+                       "\u274c Wrong file — this looks like expression data, not a grouping file. ",
+                       "Please upload it into the Expression Data box instead.")
+            )
+            stop("The uploaded grouping file looks like expression data (has 'class' column and ",
+                 ncol(grp_peek), " columns). Please swap the files.")
+          }
+        }
+        setProgress(0.3, detail = "Grouping file OK...")
+
+        # ── Parse expression ────────────────────────────────────────────
         expr_data <- read_expression(expr_path)
+        output$expr_file_status <- renderUI(
+          tags$div(class = "text-success mt-1", "\u2705 Expression data loaded")
+        )
         setProgress(0.5, detail = "Reading groups...")
 
         # Read groups (resolve auto-detect from the file extension)
@@ -806,6 +1160,9 @@ server <- function(input, output, session) {
         } else {
           read_groups(groups_path)
         }
+        output$groups_file_status <- renderUI(
+          tags$div(class = "text-success mt-1", "\u2705 Grouping file loaded")
+        )
 
         setProgress(0.8, detail = "Building dataset...")
 
@@ -821,6 +1178,8 @@ server <- function(input, output, session) {
         rv$dataset   <- ds
         rv$loaded    <- TRUE
         rv$dataset_name <- tools::file_path_sans_ext(basename(expr_path))
+        rv$expr_file_path <- normalizePath(expr_path, mustWork = FALSE)
+        rv$groups_file_path <- normalizePath(groups_path, mustWork = FALSE)
 
         # Reset downstream
         rv$collapsed <- FALSE
@@ -832,10 +1191,80 @@ server <- function(input, output, session) {
 
       showNotification("\u2705 Data loaded successfully!", type = "message")
     }, error = function(e) {
-      showNotification(paste("\u274C Error:", e$message), type = "error",
+      showNotification(paste("\u274c Error:", e$message), type = "error",
                        duration = 10)
     })
   }
+  # ── Instant validation on file upload ──────────────────────────────────
+  observeEvent(input$expr_file, {
+    req(input$expr_file)
+    peek <- tryCatch(
+      data.table::fread(input$expr_file$datapath, nrows = 3, header = TRUE, check.names = FALSE),
+      error = function(e) NULL
+    )
+    if (is.null(peek) || ncol(peek) < 3) {
+      output$expr_file_status <- renderUI(
+        tags$div(class = "text-danger mt-1", style = "font-weight:600;",
+                 "\u274c Wrong file type — expected an expression CSV with many gene columns.")
+      )
+    } else if (!"class" %in% names(peek)) {
+      if (ncol(peek) == 2) {
+        output$expr_file_status <- renderUI(
+          tags$div(class = "text-danger mt-1", style = "font-weight:600;",
+                   "\u274c Wrong file — this looks like a grouping file (2 columns). ",
+                   "Upload it into the Grouping File box instead.")
+        )
+      } else {
+        output$expr_file_status <- renderUI(
+          tags$div(class = "text-danger mt-1", style = "font-weight:600;",
+                   "\u274c Missing 'class' column. Found: ",
+                   paste(head(names(peek), 5), collapse = ", "),
+                   if (ncol(peek) > 5) "..." else "")
+        )
+      }
+    } else {
+      output$expr_file_status <- renderUI(
+        tags$div(class = "text-success mt-1", "\u2705 Expression file looks valid")
+      )
+    }
+  })
+
+  observeEvent(input$groups_file, {
+    req(input$groups_file)
+    ext <- tolower(tools::file_ext(input$groups_file$name))
+    if (ext == "gmt") {
+      # GMT files are fine; can't easily peek
+      output$groups_file_status <- renderUI(
+        tags$div(class = "text-success mt-1", "\u2705 GMT file selected")
+      )
+      return()
+    }
+    peek <- tryCatch(
+      data.table::fread(input$groups_file$datapath, nrows = 3, header = TRUE, check.names = FALSE),
+      error = function(e) NULL
+    )
+    if (is.null(peek) || ncol(peek) < 2) {
+      output$groups_file_status <- renderUI(
+        tags$div(class = "text-danger mt-1", style = "font-weight:600;",
+                 "\u274c Wrong file type — expected a 2-column CSV (gene, group) or GMT.")
+      )
+    } else if ("class" %in% names(peek) && ncol(peek) > 10) {
+      output$groups_file_status <- renderUI(
+        tags$div(class = "text-danger mt-1", style = "font-weight:600;",
+                 "\u274c Wrong file — this looks like expression data (has 'class' column, ",
+                 ncol(peek), " columns). Upload it into the Expression Data box instead.")
+      )
+    } else if (ncol(peek) == 2) {
+      output$groups_file_status <- renderUI(
+        tags$div(class = "text-success mt-1", "\u2705 Grouping file looks valid")
+      )
+    } else {
+      output$groups_file_status <- renderUI(
+        tags$div(class = "text-muted mt-1", "\u2139\ufe0f File has ", ncol(peek),
+                 " columns — first two will be used as (gene, group).")
+      )
+    }
+  })
 
   observeEvent(input$btn_load, {
     req(input$expr_file, input$groups_file)
@@ -1131,7 +1560,7 @@ server <- function(input, output, session) {
         tags$div(style = "font-size:1.5rem; font-weight:700;",
                  sprintf("⏳ Scoring groups… %d / %d  (%d%%)", ps$i, ps$n, pct)),
         tags$div(class = "text-muted",
-                 sprintf("elapsed %s · ETA %s",
+                 sprintf("elapsed %s · ~%s remaining",
                          format_duration(elapsed), format_duration(eta)))
       ),
       # progress bar
@@ -1294,7 +1723,7 @@ server <- function(input, output, session) {
   
   # Dynamic package requirements notice in sidebar
   # Prominent, color-coded readiness alert shown at the top of the Score panel.
-  alert_box <- function(type, title, body = NULL) {
+  alert_box <- function(type, title, body = NULL, closable = FALSE) {
     pal <- switch(type,
       ok    = list(bg = "rgba(106,168,79,0.15)",  bd = "#6aa84f", ic = "✅"),
       warn  = list(bg = "rgba(241,194,50,0.15)",  bd = "#f1c232", ic = "⚠️"),
@@ -1302,7 +1731,11 @@ server <- function(input, output, session) {
       info  = list(bg = "rgba(74,144,217,0.15)",  bd = "#4a90d9", ic = "ℹ️"))
     tags$div(
       class = "value-box",
-      style = sprintf("background:%s; border-left:5px solid %s;", pal$bg, pal$bd),
+      style = sprintf("background:%s; border-left:5px solid %s; position:relative;", pal$bg, pal$bd),
+      if (closable) tags$button(type = "button", class = "btn-close",
+                style = "position:absolute; top:8px; right:8px; filter:invert(1); opacity:0.6;",
+                onclick = "this.parentElement.style.display='none';",
+                `aria-label` = "Close"),
       tags$div(style = "font-size:1.15rem; font-weight:600;",
                paste0(pal$ic, " ", title)),
       if (!is.null(body)) tags$div(class = "label", style = "margin-top:4px;", HTML(body))
@@ -1320,6 +1753,13 @@ server <- function(input, output, session) {
     if (isTRUE(mc$active)) {
       return(alert_box("info", "Analysis running…",
                        "Parallel MCCV is in progress — see the live panel below."))
+    }
+    # Show a dismissable "done" banner once results are ready
+    if (isTRUE(rv$scored)) {
+      return(alert_box("ok", "Analysis complete",
+             paste0("Results are ready in the tabs below. ",
+                    "Click \U0001F30B Discover to run de novo module discovery."),
+             closable = TRUE))
     }
     if (!isTRUE(rv$loaded)) {
       return(alert_box("warn", "Step 1 — Load a dataset",
@@ -1361,6 +1801,13 @@ server <- function(input, output, session) {
                        type = "warning", duration = 6)
       return()
     }
+    session$sendCustomMessage("disableBtn", "btn_score")
+    session$sendCustomMessage("showBanner", list(
+      id = "score_status_alert",
+      title = "Analysis running…",
+      detail = "Computing scores for each group. This may take a while."
+    ))
+    on.exit(session$sendCustomMessage("enableBtn", "btn_score"))
     # Only a loaded dataset is required. Pre-Score is optional — Score creates
     # its own train/test split and pre-scores on the fly when needed.
     if (!isTRUE(rv$loaded)) {
@@ -1501,6 +1948,7 @@ server <- function(input, output, session) {
           rv$final_model   <- final_model
           rv$score_results <- results
           rv$scored <- TRUE
+        session$sendCustomMessage("enableBtn", "btn_score")
           setProgress(1, detail = "Done!")
         })
 
@@ -1594,10 +2042,24 @@ server <- function(input, output, session) {
         # \u2500\u2500 Finalize: aggregate exactly like run_mccv() \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         results <- mc$folds
         ok <- Filter(function(r) !is.null(r) && r$status == "success", results)
+        n_failed <- length(results) - length(ok)
         if (length(ok) == 0) {
           mc$active <- FALSE
-          showNotification("\u274C All MCCV folds failed.", type = "error", duration = 10)
+          # Collect error messages from failed folds
+          err_msgs <- unique(vapply(results, function(r) {
+            if (is.null(r)) "Fold returned NULL" else r$error_message %||% "Unknown error"
+          }, character(1)))
+          showNotification(
+            paste0("\u274c All ", length(results), " MCCV folds failed. Errors: ",
+                   paste(err_msgs, collapse = "; ")),
+            type = "error", duration = 15)
           return()
+        }
+        if (n_failed > 0) {
+          showNotification(
+            sprintf("\u26a0\ufe0f %d of %d folds failed. Results are based on %d successful folds.",
+                    n_failed, length(results), length(ok)),
+            type = "warning", duration = 10)
         }
         metrics_df <- do.call(rbind, lapply(ok, function(r) as.data.frame(r$metrics)))
         rv$mccv_results <- list(
@@ -1652,25 +2114,37 @@ server <- function(input, output, session) {
       }
 
       # \u2500\u2500 Run the next batch of `cores` folds in parallel \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-      batch <- min(mc$cores, mc$n - mc$done)
-      idx <- mc$done + seq_len(batch)
+      # ── Run ONE fold per tick so Shiny can update the UI ────────────────
+      idx <- mc$done + 1L
       p <- mc$params
-      runner <- function(i) mccv_run_fold(
-        p$dataset, i, train_ratio = p$train_ratio,
-        pre_score_method = p$pre_score_method,
-        pre_score_top_percent = p$pre_score_top_percent,
-        score_method = p$score_method, model_method = p$model_method,
-        score_args = p$score_args, model_args = p$model_args,
-        top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
-        fdr_alpha = p$fdr_alpha %||% 0.05, normalize = p$normalize %||% FALSE,
-        seed = p$seed)
-      res <- if (mc$cores > 1 && .Platform$OS.type != "windows") {
-        parallel::mclapply(idx, runner, mc.cores = mc$cores)
+      fold_result <- tryCatch(
+        mccv_run_fold(
+          p$dataset, idx, train_ratio = p$train_ratio,
+          pre_score_method = p$pre_score_method,
+          pre_score_top_percent = p$pre_score_top_percent,
+          score_method = p$score_method, model_method = p$model_method,
+          score_args = p$score_args, model_args = p$model_args,
+          top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
+          fdr_alpha = p$fdr_alpha %||% 0.05, normalize = p$normalize %||% FALSE,
+          seed = p$seed),
+        error = function(e) {
+          list(fold = idx, status = "error", error_message = conditionMessage(e))
+        }
+      )
+      if (is.null(fold_result)) {
+        mc$folds[[idx]] <- list(fold = idx, status = "error",
+                                error_message = "Fold returned NULL")
+        showNotification(sprintf("\u26a0\ufe0f Fold %d failed.", idx),
+                         type = "warning", duration = 6)
+      } else if (fold_result$status == "error") {
+        mc$folds[[idx]] <- fold_result
+        showNotification(sprintf("\u26a0\ufe0f Fold %d failed: %s", idx,
+                                 fold_result$error_message %||% "unknown"),
+                         type = "warning", duration = 6)
       } else {
-        lapply(idx, runner)
+        mc$folds[[idx]] <- fold_result
       }
-      for (k in seq_along(idx)) mc$folds[[idx[k]]] <- res[[k]]
-      mc$done <- mc$done + batch
+      mc$done <- mc$done + 1L
       mc$tick <- mc$tick + 1
       NULL
     }) }, error = function(e) conditionMessage(e))
@@ -1705,8 +2179,8 @@ server <- function(input, output, session) {
         tags$div(style = "font-size:1.5rem; font-weight:700;",
                  sprintf("\u23F3 Running MCCV fold %d / %d  (%d%%)", mc$done, mc$n, pct)),
         tags$div(class = "text-muted",
-                 sprintf("%d cores \u00B7 elapsed %s \u00B7 ETA %s",
-                         mc$cores, format_duration(elapsed), format_duration(eta)))
+                 sprintf("elapsed %s · ~%s remaining",
+                          format_duration(elapsed), format_duration(eta)))
       ),
       tags$div(style = "height:10px; background:rgba(255,255,255,0.08); border-radius:6px; margin:10px 0;",
         tags$div(style = sprintf("height:10px; width:%d%%; background:#4a90d9; border-radius:6px; transition:width .2s;", pct))
@@ -1796,9 +2270,6 @@ server <- function(input, output, session) {
         row("Accumulative depth (K)", s$n_groups_scored),
         row("Best k (max accuracy)", s$best_k %||% NA),
         row("Features at best k", format(s$n_features, big.mark = ",")),
-        row("Pre-scoring", if (identical(s$prescore_method, "skipped")) "skipped"
-                           else sprintf("%s · top %s%%", toupper(s$prescore_method),
-                                        s$prescore_top_percent)),
         row("Pre-scoring", if (identical(s$prescore_method, "skipped")) "skipped"
                            else sprintf("%s · top %s%%", toupper(s$prescore_method),
                                         s$prescore_top_percent)),
@@ -1895,20 +2366,24 @@ server <- function(input, output, session) {
   # ── G-S-M detect: de novo module discovery (on demand) ──────────────────
   observeEvent(input$run_detect, {
     req(rv$mccv_results, rv$dataset)
-    tryCatch(
-      withProgress(message = "Discovering robust gene modules…", value = 0.3, {
+    session$sendCustomMessage("disableBtn", "run_detect")
+    session$sendCustomMessage("showBanner", list(
+      id = "detect_status",
+      title = "Discovering robust gene modules… please wait.",
+      detail = "Building stability network, clustering modules, and running bootstraps."
+    ))
+    rv$detect_running <- TRUE
+    on.exit({ rv$detect_running <- FALSE; session$sendCustomMessage("enableBtn", "run_detect") })
+    rv$detect <- NULL
+    tryCatch({
         rv$detect <- gsm_detect(
           rv$mccv_results, rv$dataset, mode = input$detect_mode,
           top_genes = input$detect_top_genes, min_freq = input$detect_min_freq,
           resolution = input$detect_resolution, n_boot = input$detect_nboot,
           seed = 1)
-        setProgress(1, detail = "Done")
         updateSelectInput(session, "detect_module_pick",
                           choices = rv$detect$modules$Module)
-        showNotification(sprintf("🌋 Discovered %d modules from %d robust genes.",
-                                 nrow(rv$detect$modules), rv$detect$params$n_robust),
-                         type = "message")
-      }),
+      },
       error = function(e) {
         rv$detect <- NULL
         showNotification(paste("❌ Discovery failed:", conditionMessage(e)),
@@ -1917,16 +2392,30 @@ server <- function(input, output, session) {
   })
 
   output$detect_status <- renderUI({
+    if (isTRUE(rv$detect_running)) {
+      return(tags$div(
+        class = "value-box",
+        style = "background: rgba(74,144,217,0.12); border-left:4px solid #4a90d9;",
+        tags$div(style = "font-weight:600; font-size:1.1rem;",
+                 "\u23f3 Discovering robust gene modules\u2026 please wait."),
+        tags$div(class = "label", "Building stability network, clustering modules, and running bootstraps.")
+      ))
+    }
     req(rv$detect)
     p <- rv$detect$params
     has_mods <- nrow(rv$detect$modules) > 0
-    tags$div(class = "value-box",
-      style = sprintf("background: %s; border-left:4px solid %s;",
+    tags$div(id = "detect_status_bar",
+      class = "value-box",
+      style = sprintf("background: %s; border-left:4px solid %s; position:relative;",
                       if (has_mods) "rgba(106,168,79,0.12)" else "rgba(241,194,50,0.12)",
                       if (has_mods) "#6aa84f" else "#f1c232"),
-      tags$div(style = "font-weight:600;",
-               sprintf("%s %d modules · %d robust genes · mode = %s · %d iterations",
-                       if (has_mods) "✅" else "⚠️",
+      tags$button(type = "button", class = "btn-close",
+                  style = "position:absolute; top:8px; right:8px; filter:invert(1); opacity:0.6;",
+                  onclick = "this.parentElement.style.display='none';",
+                  `aria-label` = "Close"),
+      tags$div(style = "font-weight:600; padding-right:30px;",
+               sprintf("%s %d modules \u00b7 %d robust genes \u00b7 mode = %s \u00b7 %d iterations",
+                       if (has_mods) "\u2705" else "\u26a0\ufe0f",
                        nrow(rv$detect$modules), p$n_robust, p$mode, p$n_runs)),
       if (!is.null(p$note)) tags$div(class = "label", p$note),
       if (isTRUE(p$truncated))
@@ -1951,22 +2440,54 @@ server <- function(input, output, session) {
     m <- rv$detect$members
     .dt(m[m$Module == input$detect_module_pick, , drop = FALSE], dom = "tp")
   })
-  output$detect_network <- renderPlot({
+  output$detect_network_vis <- visNetwork::renderVisNetwork({
     req(rv$detect)
     validate(need(requireNamespace("igraph", quietly = TRUE),
                   "Install the 'igraph' package to view the network."))
+    validate(need(requireNamespace("visNetwork", quietly = TRUE),
+                  "Install the 'visNetwork' package for the interactive network."))
     adj <- rv$detect$graph$adjacency
     memb <- rv$detect$graph$membership
     validate(need(nrow(adj) >= 2 && sum(adj) > 0, "Network has no edges to draw."))
     g <- igraph::graph_from_adjacency_matrix(adj, mode = "undirected",
                                              weighted = TRUE, diag = FALSE)
-    cols <- grDevices::hcl.colors(max(memb), "Dark 3")[memb[igraph::V(g)$name]]
-    par(bg = "transparent", mar = c(0, 0, 0, 0))
-    plot(g, vertex.color = cols, vertex.size = 10, vertex.label.cex = 0.7,
-         vertex.label.color = "#dddddd", vertex.frame.color = NA,
-         edge.color = grDevices::adjustcolor("#4a90d9", 0.4),
-         edge.width = 1 + 4 * (igraph::E(g)$weight / max(igraph::E(g)$weight)))
-  }, bg = "transparent")
+    # Build visNetwork data from igraph
+    vn_data <- visNetwork::toVisNetworkData(g)
+    # Color nodes by module membership
+    n_modules <- max(memb, na.rm = TRUE)
+    palette <- c("#888888", grDevices::hcl.colors(n_modules, "Dark 3"))
+    # memb is a named vector (gene -> module integer); match safely
+    node_ids <- vn_data$nodes$id
+    node_memb <- memb[node_ids]
+    node_memb[is.na(node_memb)] <- 0L  # unassigned genes
+    vn_data$nodes$group <- paste0("M", sprintf("%02d", node_memb))
+    vn_data$nodes$color <- palette[node_memb + 1L]
+    vn_data$nodes$label <- node_ids
+    vn_data$nodes$title <- paste0("<b>", node_ids, "</b><br>Module: ",
+                                   vn_data$nodes$group)
+    vn_data$nodes$font.color <- "#dddddd"
+    vn_data$nodes$font.size <- 12
+    # Scale edge width by weight
+    if (!is.null(vn_data$edges$weight) && nrow(vn_data$edges) > 0) {
+      max_w <- max(vn_data$edges$weight, na.rm = TRUE)
+      vn_data$edges$width <- 1 + 4 * (vn_data$edges$weight / max_w)
+    }
+    vn_data$edges$color <- "rgba(74,144,217,0.4)"
+    visNetwork::visNetwork(vn_data$nodes, vn_data$edges,
+                           background = "transparent") |>
+      visNetwork::visPhysics(solver = "forceAtlas2Based",
+                             forceAtlas2Based = list(gravitationalConstant = -30,
+                                                     springLength = 80),
+                             stabilization = list(iterations = 150)) |>
+      visNetwork::visInteraction(navigationButtons = TRUE,
+                                  zoomView = TRUE, dragView = TRUE,
+                                  hover = TRUE,
+                                  tooltipDelay = 100) |>
+      visNetwork::visOptions(highlightNearest = list(enabled = TRUE, degree = 1,
+                                                      hover = TRUE),
+                              nodesIdSelection = FALSE) |>
+      visNetwork::visLayout(randomSeed = 42)
+  })
 
   output$export_note <- renderUI({
     req(rv$scored)
@@ -2254,6 +2775,7 @@ server <- function(input, output, session) {
     for (i in seq_along(successful_folds)) {
       fold_res <- successful_folds[[i]]
       accs <- unlist(fold_res$group_accuracies)
+      if (is.null(accs) || length(accs) == 0) next
       ranks <- rank(-accs, ties.method = "min")
       
       for (gname in names(accs)) {
@@ -2316,6 +2838,280 @@ server <- function(input, output, session) {
                   main = "", ylab = "Mean Accuracy (%)", las = 2, ylim = c(0, 100))
     abline(h = 50, col = "#888888", lty = 2)
   }, bg = "transparent")
+
+  # ══════════════════════════════════════════════════════════════════════
+  # Settings Import / Export
+  # ══════════════════════════════════════════════════════════════════════
+  
+  # Import Settings
+  observeEvent(input$import_settings, {
+    req(input$import_settings)
+    tryCatch({
+      settings <- gsmR::read_settings(input$import_settings$datapath)
+      
+      # Update UI inputs based on parsed YAML
+      if (!is.null(settings$groups_format)) updateSelectInput(session, "groups_format", selected = settings$groups_format)
+      if (!is.null(settings$min_group_size)) updateNumericInput(session, "min_group_size", value = as.numeric(settings$min_group_size))
+      if (!is.null(settings$max_group_size)) updateNumericInput(session, "max_group_size", value = as.numeric(settings$max_group_size))
+      
+      if (!is.null(settings$collapse_method)) updateSelectInput(session, "collapse_method", selected = settings$collapse_method)
+      if (!is.null(settings$meta_conflict)) updateSelectInput(session, "meta_conflict", selected = settings$meta_conflict)
+      if (!is.null(settings$keep_original)) updateCheckboxInput(session, "keep_original", value = as.logical(settings$keep_original))
+      
+      if (!is.null(settings$prescore_method)) updateSelectInput(session, "prescore_method", selected = settings$prescore_method)
+      if (!is.null(settings$top_percent)) updateSliderInput(session, "top_percent", value = as.numeric(settings$top_percent))
+      if (!is.null(settings$train_ratio)) updateSliderInput(session, "train_ratio", value = as.numeric(settings$train_ratio))
+      if (!is.null(settings$prescore_seed)) updateNumericInput(session, "prescore_seed", value = as.numeric(settings$prescore_seed))
+      
+      if (!is.null(settings$perm_method)) updateSelectInput(session, "perm_method", selected = settings$perm_method)
+      if (!is.null(settings$perm_nperm)) updateNumericInput(session, "perm_nperm", value = as.numeric(settings$perm_nperm))
+      
+      if (!is.null(settings$score_method)) updateSelectInput(session, "score_method", selected = settings$score_method)
+      if (!is.null(settings$rf_ntree)) updateNumericInput(session, "rf_ntree", value = as.numeric(settings$rf_ntree))
+      if (!is.null(settings$svm_kernel)) updateSelectInput(session, "svm_kernel", selected = settings$svm_kernel)
+      if (!is.null(settings$svm_cost)) updateNumericInput(session, "svm_cost", value = as.numeric(settings$svm_cost))
+      if (!is.null(settings$svm_gamma)) updateNumericInput(session, "svm_gamma", value = as.numeric(settings$svm_gamma))
+      if (!is.null(settings$knn_k)) updateNumericInput(session, "knn_k", value = as.numeric(settings$knn_k))
+      
+      if (!is.null(settings$shave_genes)) updateCheckboxInput(session, "shave_genes", value = as.logical(settings$shave_genes))
+      if (!is.null(settings$fdr_alpha)) updateNumericInput(session, "fdr_alpha", value = as.numeric(settings$fdr_alpha))
+      if (!is.null(settings$normalize_z)) updateCheckboxInput(session, "normalize_z", value = as.logical(settings$normalize_z))
+      
+      if (!is.null(settings$score_scope)) updateRadioButtons(session, "score_scope", selected = settings$score_scope)
+      if (!is.null(settings$n_top_groups)) updateNumericInput(session, "n_top_groups", value = as.numeric(settings$n_top_groups))
+      if (!is.null(settings$score_seed)) updateNumericInput(session, "score_seed", value = as.numeric(settings$score_seed))
+      
+      if (!is.null(settings$run_mccv_mode)) updateCheckboxInput(session, "run_mccv_mode", value = as.logical(settings$run_mccv_mode))
+      if (!is.null(settings$mccv_iterations)) updateNumericInput(session, "mccv_iterations", value = as.numeric(settings$mccv_iterations))
+      if (!is.null(settings$model_method)) updateSelectInput(session, "model_method", selected = settings$model_method)
+      if (!is.null(settings$mccv_train_ratio)) updateSliderInput(session, "mccv_train_ratio", value = as.numeric(settings$mccv_train_ratio))
+      if (!is.null(settings$mccv_cores)) updateSliderInput(session, "mccv_cores", value = as.numeric(settings$mccv_cores))
+      
+      if (!is.null(settings$detect_mode)) updateRadioButtons(session, "detect_mode", selected = settings$detect_mode)
+      if (!is.null(settings$detect_top_genes)) updateNumericInput(session, "detect_top_genes", value = as.numeric(settings$detect_top_genes))
+      if (!is.null(settings$detect_min_freq)) updateNumericInput(session, "detect_min_freq", value = as.numeric(settings$detect_min_freq))
+      if (!is.null(settings$detect_resolution)) updateNumericInput(session, "detect_resolution", value = as.numeric(settings$detect_resolution))
+      if (!is.null(settings$detect_nboot)) updateNumericInput(session, "detect_nboot", value = as.numeric(settings$detect_nboot))
+
+      output$import_settings_status <- renderUI({
+        tags$div(class = "text-success mt-2", "✅ Settings imported successfully!")
+      })
+    }, error = function(e) {
+      output$import_settings_status <- renderUI({
+        tags$div(class = "text-danger mt-2", paste("❌ Error loading settings:", e$message))
+      })
+    })
+  })
+
+  # Export Settings
+  output$export_settings <- downloadHandler(
+    filename = function() {
+      paste0("gsmr_settings_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".yaml")
+    },
+    content = function(file) {
+      tryCatch({
+        current_values <- list(
+          expression_file = rv$expr_file_path %||% "",
+          groups_file = rv$groups_file_path %||% "",
+          groups_format = input$groups_format,
+          min_group_size = input$min_group_size,
+          max_group_size = input$max_group_size,
+          collapse_method = input$collapse_method,
+          meta_conflict = input$meta_conflict,
+          keep_original = input$keep_original,
+          prescore_method = input$prescore_method,
+          top_percent = input$top_percent,
+          train_ratio = input$train_ratio,
+          prescore_seed = input$prescore_seed,
+          perm_method = input$perm_method,
+          perm_nperm = input$perm_nperm,
+          score_method = input$score_method,
+          rf_ntree = input$rf_ntree,
+          svm_kernel = input$svm_kernel,
+          svm_cost = input$svm_cost,
+          svm_gamma = input$svm_gamma,
+          knn_k = input$knn_k,
+          shave_genes = input$shave_genes,
+          fdr_alpha = input$fdr_alpha,
+          normalize_z = input$normalize_z,
+          score_scope = input$score_scope,
+          n_top_groups = input$n_top_groups,
+          score_seed = input$score_seed,
+          run_mccv_mode = input$run_mccv_mode,
+          mccv_iterations = input$mccv_iterations,
+          model_method = input$model_method,
+          mccv_train_ratio = input$mccv_train_ratio,
+          mccv_cores = input$mccv_cores,
+          detect_mode = input$detect_mode,
+          detect_top_genes = input$detect_top_genes,
+          detect_min_freq = input$detect_min_freq,
+          detect_resolution = input$detect_resolution,
+          detect_nboot = input$detect_nboot
+        )
+        gsmR::export_settings(current_values, file)
+      }, error = function(e) {
+        cat("EXPORT ERROR: ", e$message, "\n", file = stderr())
+        writeLines(paste("Error generating YAML:", e$message), file)
+      })
+    }
+  )
+
+  # -- Browse button: open native OS file chooser (macOS osascript) --
+  observeEvent(input$btn_browse_save, {
+    init_dir <- dirname(input$save_session_path)
+    init_file <- basename(input$save_session_path)
+    chosen <- tryCatch({
+      if (Sys.info()[["sysname"]] == "Darwin") {
+        # macOS: use osascript for native Save dialog
+        cmd <- sprintf(
+          "osascript -e 'tell application \"System Events\" to set p to POSIX path of (choose file name with prompt \"Save session as:\" default name \"%s\" default location POSIX file \"%s\")'",
+          init_file, init_dir)
+        trimws(system(cmd, intern = TRUE))
+      } else if (requireNamespace("tcltk", quietly = TRUE)) {
+        as.character(tcltk::tkgetSaveFile(
+          initialdir = init_dir, initialfile = init_file,
+          filetypes = "{{RDS Files} {.rds}} {{All Files} {*}}"))
+      } else ""
+    }, error = function(e) "")
+    if (nchar(chosen) > 0) {
+      if (!grepl("\\.rds$", chosen, ignore.case = TRUE)) chosen <- paste0(chosen, ".rds")
+      updateTextInput(session, "save_session_path", value = chosen)
+    }
+  })
+
+  # -- Save button: write session to the chosen path --
+  observeEvent(input$btn_save_session, {
+    save_path <- input$save_session_path
+    if (is.null(save_path) || nchar(trimws(save_path)) == 0) {
+      output$save_session_status <- renderUI(
+        tags$div(class = "text-danger mt-2", "\u274c Please specify a save path."))
+      return()
+    }
+    tryCatch({
+      dir.create(dirname(save_path), showWarnings = FALSE, recursive = TRUE)
+      session_data <- list(
+        expr_data = rv$expr_data, groups = rv$groups,
+        dataset = rv$dataset, dataset_name = rv$dataset_name,
+        loaded = rv$loaded,
+        collapse_result = rv$collapse_result, collapsed = rv$collapsed,
+        time_collapse = rv$time_collapse,
+        prescore_groups = rv$prescore_groups, prescore_scores = rv$prescore_scores,
+        prescore_nkeep = rv$prescore_nkeep, prescored = rv$prescored,
+        train_idx = rv$train_idx, time_prescore = rv$time_prescore,
+        score_results = rv$score_results, final_model = rv$final_model,
+        accumulative = rv$accumulative, mccv_results = rv$mccv_results,
+        scored = rv$scored, score_summary = rv$score_summary,
+        time_score = rv$time_score,
+        detect = rv$detect, permtest = rv$permtest,
+        mccv_group_summary = rv$mccv_group_summary,
+        settings = list(
+          score_method = input$score_method, run_mccv_mode = input$run_mccv_mode,
+          mccv_iterations = input$mccv_iterations, model_method = input$model_method,
+          mccv_train_ratio = input$mccv_train_ratio, score_scope = input$score_scope,
+          n_top_groups = input$n_top_groups, score_seed = input$score_seed,
+          top_percent = input$top_percent, normalize = input$normalize,
+          detect_mode = input$detect_mode, detect_top_genes = input$detect_top_genes,
+          detect_min_freq = input$detect_min_freq, detect_resolution = input$detect_resolution,
+          detect_nboot = input$detect_nboot
+        ),
+        saved_at = Sys.time(), r_version = R.version.string,
+        gsmR_version = tryCatch(as.character(utils::packageVersion("gsmR")),
+                                error = function(e) "unknown")
+      )
+      saveRDS(session_data, save_path)
+      output$save_session_status <- renderUI(
+        tags$div(class = "text-success mt-2",
+                 sprintf("\u2705 Session saved to %s", save_path)))
+      showNotification(sprintf("\U0001F4BE Session saved to %s", save_path),
+                       type = "message", duration = 5)
+    }, error = function(e) {
+      output$save_session_status <- renderUI(
+        tags$div(class = "text-danger mt-2",
+                 paste0("\u274c Save failed: ", conditionMessage(e))))
+    })
+  })
+
+  observeEvent(input$load_session_file, {
+    req(input$load_session_file)
+    f <- input$load_session_file
+    if (!grepl("\\.rds$", tolower(f$name))) {
+      output$load_session_status <- renderUI(
+        tags$div(class = "text-danger mt-2", "\u274c Wrong file type. Please upload a .rds session file.")
+      )
+      return()
+    }
+    tryCatch({
+      sess <- readRDS(f$datapath)
+      # Validate it's a gsmR session
+      if (!is.list(sess) || is.null(sess$saved_at)) {
+        output$load_session_status <- renderUI(
+          tags$div(class = "text-danger mt-2",
+                   "\u274c This file does not appear to be a valid gsmR session.")
+        )
+        return()
+      }
+      # Restore all reactive values
+      rv$expr_data        <- sess$expr_data
+      rv$groups           <- sess$groups
+      rv$dataset          <- sess$dataset
+      rv$dataset_name     <- sess$dataset_name
+      rv$loaded           <- sess$loaded %||% FALSE
+      rv$collapse_result  <- sess$collapse_result
+      rv$collapsed        <- sess$collapsed %||% FALSE
+      rv$time_collapse    <- sess$time_collapse
+      rv$prescore_groups  <- sess$prescore_groups
+      rv$prescore_scores  <- sess$prescore_scores
+      rv$prescore_nkeep   <- sess$prescore_nkeep
+      rv$prescored        <- sess$prescored %||% FALSE
+      rv$train_idx        <- sess$train_idx
+      rv$time_prescore    <- sess$time_prescore
+      rv$score_results    <- sess$score_results
+      rv$final_model      <- sess$final_model
+      rv$accumulative     <- sess$accumulative
+      rv$mccv_results     <- sess$mccv_results
+      rv$scored           <- sess$scored %||% FALSE
+      rv$score_summary    <- sess$score_summary
+      rv$time_score       <- sess$time_score
+      rv$detect           <- sess$detect
+      rv$permtest         <- sess$permtest
+      rv$mccv_group_summary <- sess$mccv_group_summary
+      # Restore UI settings
+      s <- sess$settings
+      if (!is.null(s)) {
+        if (!is.null(s$score_method))      updateRadioButtons(session, "score_method", selected = s$score_method)
+        if (!is.null(s$run_mccv_mode))     updateCheckboxInput(session, "run_mccv_mode", value = s$run_mccv_mode)
+        if (!is.null(s$mccv_iterations))   updateNumericInput(session, "mccv_iterations", value = s$mccv_iterations)
+        if (!is.null(s$model_method))      updateSelectInput(session, "model_method", selected = s$model_method)
+        if (!is.null(s$mccv_train_ratio))  updateSliderInput(session, "mccv_train_ratio", value = s$mccv_train_ratio)
+        if (!is.null(s$score_scope))       updateRadioButtons(session, "score_scope", selected = s$score_scope)
+        if (!is.null(s$n_top_groups))      updateNumericInput(session, "n_top_groups", value = s$n_top_groups)
+        if (!is.null(s$score_seed))        updateNumericInput(session, "score_seed", value = s$score_seed)
+        if (!is.null(s$normalize))         updateCheckboxInput(session, "normalize", value = s$normalize)
+        if (!is.null(s$detect_mode))       updateRadioButtons(session, "detect_mode", selected = s$detect_mode)
+        if (!is.null(s$detect_top_genes))  updateNumericInput(session, "detect_top_genes", value = s$detect_top_genes)
+        if (!is.null(s$detect_min_freq))   updateNumericInput(session, "detect_min_freq", value = s$detect_min_freq)
+        if (!is.null(s$detect_resolution)) updateNumericInput(session, "detect_resolution", value = s$detect_resolution)
+        if (!is.null(s$detect_nboot))      updateNumericInput(session, "detect_nboot", value = s$detect_nboot)
+      }
+      # Update Discover module picker if detection results exist
+      if (!is.null(sess$detect) && !is.null(sess$detect$modules)) {
+        updateSelectInput(session, "detect_module_pick",
+                          choices = sess$detect$modules$Module)
+      }
+      output$load_session_status <- renderUI(
+        tags$div(class = "text-success mt-2",
+                 sprintf("\u2705 Session restored! Saved %s with R %s.",
+                         format(sess$saved_at, "%Y-%m-%d %H:%M"),
+                         sess$r_version %||% "?"))
+      )
+      showNotification("\u2705 Session loaded \u2014 all results restored!", type = "message", duration = 6)
+    }, error = function(e) {
+      output$load_session_status <- renderUI(
+        tags$div(class = "text-danger mt-2",
+                 paste0("\u274c Failed to load session: ", conditionMessage(e)))
+      )
+    })
+  })
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
