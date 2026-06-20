@@ -1041,7 +1041,14 @@ server <- function(input, output, session) {
   # Batched MCCV worker state (runs `cores` folds per cycle, streams results).
   mc <- reactiveValues(
     active = FALSE, done = 0, n = 0, tick = 0,
-    cores = 1, folds = NULL, params = NULL, t0 = NULL
+    cores = 1, folds = NULL, params = NULL, t0 = NULL,
+    # Non-blocking parallel scheduler state:
+    running = list(),       # named (fold idx) list of mcparallel job handles in flight
+    queue = integer(0),     # fold indices not yet launched
+    started = 0,            # how many folds have been launched
+    fold_started = list(),  # per-fold launch time (secs since t0)
+    summary_open = FALSE,   # keep the completion banner on screen until dismissed
+    last_summary = NULL     # snapshot shown in the persistent "done" banner
   )
 
   # ── Output flags for conditionalPanel ──────────────────────────────────
@@ -2018,6 +2025,13 @@ server <- function(input, output, session) {
         mc$primed <- FALSE   # first worker tick only paints the live panel
         mc$t0     <- Sys.time()
         mc$active <- TRUE
+        # Scheduler state: queue every fold, nothing running yet.
+        mc$running      <- list()
+        mc$queue        <- seq_len(mc$n)
+        mc$started      <- 0
+        mc$fold_started <- list()
+        mc$summary_open <- FALSE
+        mc$last_summary <- NULL
         showNotification(sprintf("🚀 Starting Parallel MCCV: %d folds on %d core(s)…",
                                  mc$n, mc$cores), type = "message", duration = 5)
       }
@@ -2038,7 +2052,35 @@ server <- function(input, output, session) {
       return()
     }
     err <- tryCatch({ isolate({
-      if (mc$done >= mc$n) {
+      # 1) Reap folds whose forked worker has finished — non-blocking, so the
+      #    Shiny loop stays responsive and the live panel keeps repainting
+      #    while the remaining folds keep running on their cores.
+      if (length(mc$running) > 0) {
+        running  <- mc$running
+        folds    <- mc$folds
+        done     <- mc$done
+        finished <- character(0)
+        for (k in names(running)) {
+          got <- parallel::mccollect(running[[k]], wait = FALSE, timeout = 0)
+          if (!is.null(got)) {
+            idx <- as.integer(k)
+            val <- got[[1]]
+            folds[[idx]] <- if (is.null(val) || inherits(val, "try-error"))
+              list(fold = idx, status = "error", error_message = "Fold worker crashed")
+            else val
+            finished <- c(finished, k)
+            done <- done + 1L
+          }
+        }
+        if (length(finished) > 0) {
+          for (k in finished) running[[k]] <- NULL
+          mc$running <- running; mc$folds <- folds; mc$done <- done
+          mc$tick <- mc$tick + 1
+        }
+      }
+
+      # 2) All folds launched AND reaped -> aggregate and finish.
+      if (mc$done >= mc$n && length(mc$running) == 0) {
         # \u2500\u2500 Finalize: aggregate exactly like run_mccv() \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         results <- mc$folds
         ok <- Filter(function(r) !is.null(r) && r$status == "success", results)
@@ -2106,6 +2148,13 @@ server <- function(input, output, session) {
         )
         rv$scored <- TRUE
         rv$time_score <- as.numeric(difftime(Sys.time(), mc$t0, units = "secs"))
+        # Snapshot for the persistent completion banner (stays until dismissed).
+        mc_metrics <- colMeans(metrics_df, na.rm = TRUE)
+        mc$last_summary <- list(
+          n = mc$n, ok = length(ok), failed = n_failed, cores = mc$cores,
+          elapsed = rv$time_score, mean_acc = mc_metrics[["Accuracy"]] %||% NA_real_,
+          metrics = mc_metrics)
+        mc$summary_open <- TRUE
         mc$active <- FALSE
         showNotification(sprintf("\u2705 Parallel MCCV finished %d/%d folds in %s!",
                                  length(ok), mc$n, format_duration(rv$time_score)),
@@ -2113,39 +2162,56 @@ server <- function(input, output, session) {
         return()
       }
 
-      # \u2500\u2500 Run the next batch of `cores` folds in parallel \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-      # ── Run ONE fold per tick so Shiny can update the UI ────────────────
-      idx <- mc$done + 1L
-      p <- mc$params
-      fold_result <- tryCatch(
-        mccv_run_fold(
-          p$dataset, idx, train_ratio = p$train_ratio,
-          pre_score_method = p$pre_score_method,
-          pre_score_top_percent = p$pre_score_top_percent,
-          score_method = p$score_method, model_method = p$model_method,
-          score_args = p$score_args, model_args = p$model_args,
-          top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
-          fdr_alpha = p$fdr_alpha %||% 0.05, normalize = p$normalize %||% FALSE,
-          seed = p$seed),
-        error = function(e) {
-          list(fold = idx, status = "error", error_message = conditionMessage(e))
+      # 3) Keep the core budget full: launch queued folds as background forks
+      #    until `cores` are in flight. Each fold is independently seeded
+      #    (seed + fold in mccv_run_fold), so parallel == sequential results.
+      p     <- mc$params
+      cores <- max(1L, as.integer(mc$cores %||% 1L))
+      if (length(mc$queue) > 0 && .Platform$OS.type != "windows") {
+        running <- mc$running
+        queue   <- mc$queue
+        started <- mc$fold_started
+        while (length(running) < cores && length(queue) > 0) {
+          idx <- queue[1]; queue <- queue[-1]
+          job <- parallel::mcparallel(
+            tryCatch(
+              mccv_run_fold(
+                p$dataset, idx, train_ratio = p$train_ratio,
+                pre_score_method = p$pre_score_method,
+                pre_score_top_percent = p$pre_score_top_percent,
+                score_method = p$score_method, model_method = p$model_method,
+                score_args = p$score_args, model_args = p$model_args,
+                top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
+                fdr_alpha = p$fdr_alpha %||% 0.05, normalize = p$normalize %||% FALSE,
+                seed = p$seed),
+              error = function(e) list(fold = idx, status = "error",
+                                       error_message = conditionMessage(e))),
+            name = as.character(idx))
+          running[[as.character(idx)]] <- job
+          started[[as.character(idx)]] <-
+            as.numeric(difftime(Sys.time(), mc$t0, units = "secs"))
         }
-      )
-      if (is.null(fold_result)) {
-        mc$folds[[idx]] <- list(fold = idx, status = "error",
-                                error_message = "Fold returned NULL")
-        showNotification(sprintf("\u26a0\ufe0f Fold %d failed.", idx),
-                         type = "warning", duration = 6)
-      } else if (fold_result$status == "error") {
-        mc$folds[[idx]] <- fold_result
-        showNotification(sprintf("\u26a0\ufe0f Fold %d failed: %s", idx,
-                                 fold_result$error_message %||% "unknown"),
-                         type = "warning", duration = 6)
-      } else {
-        mc$folds[[idx]] <- fold_result
+        mc$running <- running; mc$queue <- queue; mc$fold_started <- started
+        mc$started <- mc$n - length(queue)
+      } else if (length(mc$queue) > 0) {
+        # No fork available (Windows): run one fold synchronously per tick.
+        idx <- mc$queue[1]; mc$queue <- mc$queue[-1]
+        mc$started <- mc$n - length(mc$queue)
+        fr <- tryCatch(
+          mccv_run_fold(
+            p$dataset, idx, train_ratio = p$train_ratio,
+            pre_score_method = p$pre_score_method,
+            pre_score_top_percent = p$pre_score_top_percent,
+            score_method = p$score_method, model_method = p$model_method,
+            score_args = p$score_args, model_args = p$model_args,
+            top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
+            fdr_alpha = p$fdr_alpha %||% 0.05, normalize = p$normalize %||% FALSE,
+            seed = p$seed),
+          error = function(e) list(fold = idx, status = "error",
+                                   error_message = conditionMessage(e)))
+        folds <- mc$folds; folds[[idx]] <- fr; mc$folds <- folds
+        mc$done <- mc$done + 1L; mc$tick <- mc$tick + 1
       }
-      mc$done <- mc$done + 1L
-      mc$tick <- mc$tick + 1
       NULL
     }) }, error = function(e) conditionMessage(e))
 
@@ -2155,7 +2221,8 @@ server <- function(input, output, session) {
       showNotification(paste("⛔ MCCV stopped:", err), type = "error", duration = 12)
       return()
     }
-    if (isTRUE(mc$active)) invalidateLater(20)
+    # Poll briskly while work is in flight so the live panel stays smooth.
+    if (isTRUE(mc$active)) invalidateLater(200)
   })
 
   # Helper: accuracy vector from completed folds (in fold order).
@@ -2164,31 +2231,113 @@ server <- function(input, output, session) {
   }
 
   output$mccv_live_status <- renderUI({
-    req(mc$active)
-    pct <- if (mc$n > 0) round(100 * mc$done / mc$n) else 0
+    # -- Persistent completion banner: stays on screen until dismissed --
+    if (!isTRUE(mc$active)) {
+      if (!isTRUE(mc$summary_open) || is.null(mc$last_summary)) return(NULL)
+      ls <- mc$last_summary; m <- ls$metrics
+      metric_chip <- function(lab, val) tags$div(
+        style = "flex:1 1 90px; text-align:center; padding:8px 6px; background:rgba(255,255,255,0.04); border-radius:8px;",
+        tags$div(class = "text-muted", style = "font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;", lab),
+        tags$div(style = "font-size:1.15rem; font-weight:700;",
+                 if (is.null(val) || is.na(val)) "—" else sprintf("%.3f", val)))
+      return(tags$div(
+        class = "value-box",
+        style = "background: rgba(46,160,90,0.12); border-left: 4px solid #2ea05a;",
+        tags$div(style = "display:flex; justify-content:space-between; align-items:center; gap:1rem;",
+          tags$div(style = "font-size:1.35rem; font-weight:700;",
+                   HTML(sprintf("✅ MCCV complete &mdash; %d/%d folds in %s",
+                                ls$ok, ls$n, format_duration(ls$elapsed)))),
+          actionButton("mccv_dismiss_summary", "Dismiss",
+                       class = "btn btn-sm btn-outline-light")),
+        tags$div(class = "text-muted", style = "margin:4px 0 10px;",
+                 sprintf("Ran on %d CPU core(s)%s · mean accuracy %s",
+                         ls$cores,
+                         if (ls$failed > 0) sprintf(" · %d fold(s) failed", ls$failed) else "",
+                         if (is.na(ls$mean_acc)) "—" else sprintf("%.1f%%", 100 * ls$mean_acc))),
+        tags$div(style = "display:flex; gap:8px; flex-wrap:wrap;",
+                 lapply(names(m), function(nm) metric_chip(gsub("_", " ", nm), m[[nm]])))
+      ))
+    }
+
+    # -- Live running panel --
+    invalidateLater(500)                 # keep the elapsed clock ticking
+    n       <- mc$n; done <- mc$done
+    running <- mc$running; n_run <- length(running); n_queue <- length(mc$queue)
+    cores   <- max(1L, as.integer(mc$cores %||% 1L))
+    pct     <- if (n > 0) round(100 * done / n) else 0
     elapsed <- as.numeric(difftime(Sys.time(), mc$t0, units = "secs"))
-    eta <- if (mc$done > 0) elapsed / mc$done * (mc$n - mc$done) else NA
-    ok <- mccv_done_folds()
-    accs <- vapply(ok, function(r) as.numeric(r$metrics$Accuracy), numeric(1))
-    best <- if (length(accs)) sprintf("%.1f%%", 100 * max(accs)) else "\u2014"
-    meanacc <- if (length(accs)) sprintf("%.1f%%", 100 * mean(accs)) else "\u2014"
+    eta     <- if (done > 0) elapsed / done * (n - done) else NA
+    ok      <- mccv_done_folds()
+    accs    <- vapply(ok, function(r) as.numeric(r$metrics$Accuracy), numeric(1))
+    meanacc <- if (length(accs)) sprintf("%.1f%%", 100 * mean(accs)) else "—"
+
+    run_idx  <- as.integer(names(running))
+    fail_idx <- which(vapply(mc$folds, function(r)
+                        !is.null(r) && identical(r$status, "error"), logical(1)))
+    acc_by_fold <- stats::setNames(rep(NA_real_, n), as.character(seq_len(n)))
+    for (r in ok) acc_by_fold[as.character(r$fold)] <- as.numeric(r$metrics$Accuracy)
+
+    stat <- function(lab, val, col = "#eaeaea") tags$div(
+      style = "flex:1 1 90px; text-align:center;",
+      tags$div(style = sprintf("font-size:1.3rem; font-weight:700; color:%s;", col), val),
+      tags$div(class = "text-muted",
+               style = "font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;", lab))
+
+    chip <- function(i) {
+      ik <- as.character(i)
+      running_now <- (i %in% run_idx) && !(i %in% fail_idx) && is.na(acc_by_fold[ik])
+      if (i %in% fail_idx) {
+        bg <- "rgba(217,83,79,0.20)"; bd <- "#d9534f"; txt <- sprintf("F%d ✗", i)
+      } else if (!is.na(acc_by_fold[ik])) {
+        bg <- "rgba(46,160,90,0.20)"; bd <- "#2ea05a"
+        txt <- sprintf("F%d %.0f%%", i, 100 * acc_by_fold[ik])
+      } else if (running_now) {
+        bg <- "rgba(74,144,217,0.30)"; bd <- "#4a90d9"; txt <- sprintf("F%d ▶", i)
+      } else {
+        bg <- "rgba(255,255,255,0.04)"; bd <- "rgba(255,255,255,0.12)"; txt <- sprintf("F%d", i)
+      }
+      tags$span(class = if (running_now) "gsm-chip gsm-chip-run" else "gsm-chip",
+                style = sprintf("background:%s; border:1px solid %s;", bg, bd), txt)
+    }
+    grid <- if (n <= 120)
+      tags$div(style = "display:flex; flex-wrap:wrap; gap:6px; margin-top:10px;",
+               lapply(seq_len(n), chip))
+    else
+      tags$div(class = "text-muted", style = "margin-top:10px;",
+               sprintf("%d folds — per-fold grid hidden for readability.", n))
+
+    css <- paste0(
+      ".gsm-chip{display:inline-block;min-width:54px;text-align:center;padding:5px 8px;",
+      "border-radius:7px;font-size:.78rem;font-weight:600;font-variant-numeric:tabular-nums;}",
+      "@keyframes gsmPulse{0%{opacity:.5}50%{opacity:1}100%{opacity:.5}}",
+      ".gsm-chip-run{animation:gsmPulse 1s ease-in-out infinite;}")
+
     tags$div(
       class = "value-box",
       style = "background: rgba(74,144,217,0.12); border-left: 4px solid #4a90d9;",
-      tags$div(style = "display:flex; justify-content:space-between; align-items:baseline;",
-        tags$div(style = "font-size:1.5rem; font-weight:700;",
-                 sprintf("\u23F3 Running MCCV fold %d / %d  (%d%%)", mc$done, mc$n, pct)),
+      tags$style(HTML(css)),
+      tags$div(style = "display:flex; justify-content:space-between; align-items:baseline; gap:1rem;",
+        tags$div(style = "font-size:1.4rem; font-weight:700;",
+                 HTML(sprintf("⚡ Parallel MCCV running &mdash; %d/%d folds (%d%%)", done, n, pct))),
         tags$div(class = "text-muted",
-                 sprintf("elapsed %s · ~%s remaining",
-                          format_duration(elapsed), format_duration(eta)))
-      ),
-      tags$div(style = "height:10px; background:rgba(255,255,255,0.08); border-radius:6px; margin:10px 0;",
-        tags$div(style = sprintf("height:10px; width:%d%%; background:#4a90d9; border-radius:6px; transition:width .2s;", pct))
-      ),
-      tags$div(class = "label",
-               HTML(sprintf("Folds done: <b>%d</b> &nbsp;|&nbsp; Mean accuracy: <b>%s</b> &nbsp;|&nbsp; Best: <b>%s</b>",
-                            length(ok), meanacc, best)))
+                 HTML(sprintf("elapsed <b>%s</b> &middot; ~%s remaining",
+                              format_duration(elapsed), format_duration(eta))))),
+      tags$div(style = "height:12px; background:rgba(255,255,255,0.08); border-radius:6px; margin:12px 0; overflow:hidden;",
+        tags$div(style = sprintf("height:12px; width:%d%%; background:linear-gradient(90deg,#4a90d9,#5fd0c0); border-radius:6px; transition:width .3s;", pct))),
+      tags$div(style = "display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 2px;",
+        stat("Cores busy", sprintf("%d / %d", n_run, cores), "#5fd0c0"),
+        stat("Completed", sprintf("%d / %d", done, n)),
+        stat("Running", n_run, "#4a90d9"),
+        stat("Queued", n_queue, "#aaaaaa"),
+        stat("Mean acc", meanacc, "#2ea05a"),
+        stat("ETA", format_duration(eta))),
+      grid
     )
+  })
+
+  # Dismiss the persistent MCCV completion banner.
+  observeEvent(input$mccv_dismiss_summary, {
+    mc$summary_open <- FALSE
   })
 
   output$plot_mccv_live <- renderPlot({

@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libglpk-dev \
         libgmp-dev \
         zlib1g-dev \
+        libuv1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Use Posit Package Manager binaries for fast, reproducible installs.
@@ -33,6 +34,12 @@ RUN R -e 'install.packages(c( \
         "randomForest", "e1071", "caret", "igraph", "Matrix", \
         "RobustRankAggreg", "openxlsx", "remotes" \
     ))'
+
+# Additional packages the Shiny GUI loads at startup / on demand:
+#   visNetwork — interactive detection-network graph (referenced in the UI)
+#   yaml       — settings import/export (a hard Import of gsmR)
+#   xgboost    — optional XGBoost classifier
+RUN R -e 'install.packages(c("visNetwork", "yaml", "xgboost"))'
 
 WORKDIR /app
 COPY . /app
