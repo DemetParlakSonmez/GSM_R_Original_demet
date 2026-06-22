@@ -3443,7 +3443,7 @@ server <- function(input, output, session) {
                         paste0("gsmR_batch_", format(Sys.time(), "%Y%m%d_%H%M%S")))
 
     st <- tryCatch(
-      gsm_batch_new_state(expr_files, groups_path, params = params, outdir = outdir,
+      gsmR:::gsm_batch_new_state(expr_files, groups_path, params = params, outdir = outdir,
                           cores = input$bp_cores, max_resident = input$bp_max_resident,
                           discover = isTRUE(input$bp_discover),
                           groups_format = groups_fmt),
