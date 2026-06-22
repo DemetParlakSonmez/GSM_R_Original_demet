@@ -468,11 +468,15 @@ ui <- page_navbar(
         width = 340,
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           tags$label("Method"),
-          help_tip("Statistical test to rank groups by differential expression. ANOVA uses F-statistic, limma uses moderated t-tests. None skips pre-scoring.")
+          help_tip("Statistical test to rank groups by differential expression. ANOVA/limma combine per-gene p-values with Fisher's method (biased toward large groups). Fisher (chi-square) calibrates for group size; EBM also corrects for inter-gene correlation; CAMERA is a competitive, correlation-aware gene-set test (two-class only). GSVA scores each group's single-sample enrichment activity (the signal the ML model sees). None skips pre-scoring.")
         ),
         selectInput("prescore_method", NULL,
                     choices = c("ANOVA" = "anova",
                                 "limma (moderated)" = "limma",
+                                "Fisher (chi-square, size-calibrated)" = "fisher_chisq",
+                                "Empirical Brown (correlation-aware)" = "ebm",
+                                "CAMERA (competitive, 2-class)" = "camera",
+                                "GSVA / ssGSEA enrichment" = "gsva",
                                 "None" = "none")),
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           tags$label("Top % groups to keep"),
@@ -571,11 +575,19 @@ ui <- page_navbar(
         )
       ),
       conditionalPanel(
-        condition = "!output.prescore_done && !output.prescore_running",
+        condition = "!output.prescore_done && !output.prescore_running && !output.data_loaded",
         tags$div(
           style = "text-align:center; padding:80px 20px; opacity:0.5;",
           tags$h3("\U0001F4CA Pre-score groups"),
           tags$p("Load data first, then run pre-scoring to filter groups before ML scoring.")
+        )
+      ),
+      conditionalPanel(
+        condition = "!output.prescore_done && !output.prescore_running && output.data_loaded",
+        tags$div(
+          style = "text-align:center; padding:80px 20px; opacity:0.5;",
+          tags$h3("\U0001F4CA Ready to pre-score"),
+          tags$p("Data loaded. Click \U0001F4CA Run Pre-Scoring to filter groups before ML scoring.")
         )
       )
     )
