@@ -1010,12 +1010,24 @@ ui <- page_navbar(
         title = "Batch Setup", width = 360,
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           tags$label("\U0001F9EC Datasets"),
-          help_tip("Select MANY expression datasets. Each is run against the single grouping file below, sharing the parameters here. All (dataset x fold) work units run over one shared core pool.")
+          help_tip("Pick built-in examples and/or upload your own expression files. Uploads and selected examples are combined. Each dataset runs against the single grouping file below, sharing the parameters here; all (dataset x fold) work units run over one shared core pool.")
         ),
-        selectInput("batch_datasets", NULL, choices = .example_inputs, multiple = TRUE),
+        selectInput("batch_datasets", "Built-in examples",
+                    choices = .example_inputs, multiple = TRUE),
+        tags$div(style = "display:flex; gap:6px; margin-top:-6px; margin-bottom:8px;",
+          actionButton("batch_select_all", "Select all",
+                       class = "btn-outline-light btn-sm", style = "flex:1;"),
+          actionButton("batch_clear_all", "Clear all",
+                       class = "btn-outline-light btn-sm", style = "flex:1;")),
+        fileInput("batch_upload", "…or upload expression files",
+                  multiple = TRUE, accept = c(".csv", ".tsv", ".txt")),
+        tags$hr(),
         tags$div(style = "display:flex; align-items:center; gap:4px;",
-          tags$label("\U0001F5C2️ Grouping file")),
-        selectInput("batch_groups", NULL, choices = .groups_choices),
+          tags$label("\U0001F5C2️ Grouping file"),
+          help_tip("One grouping file shared by every dataset. Pick an example, or upload your own (2-column gene,group CSV or GMT). An upload overrides the dropdown.")),
+        selectInput("batch_groups", "Built-in example", choices = .groups_choices),
+        fileInput("batch_groups_upload", "…or upload grouping file",
+                  accept = c(".csv", ".tsv", ".gmt", ".txt")),
         tags$hr(),
         selectInput("bp_score_method", "Classifier",
                     choices = c("Random Forest" = "rf",
@@ -1067,9 +1079,11 @@ ui <- page_navbar(
         condition = "output.batch_done",
         card(
           card_header("\U0001F9EC Combined cross-dataset report"),
-          layout_columns(col_widths = c(5, 7),
-            downloadButton("dl_batch_report", "\U0001F4E5 Download combined report",
+          layout_columns(col_widths = c(4, 4, 4),
+            downloadButton("dl_batch_report", "\U0001F4E5 Combined report",
                            class = "btn-primary w-100"),
+            downloadButton("dl_batch_all", "\U0001F4E6 All results (zip)",
+                           class = "btn-outline-light w-100"),
             tags$div(class = "text-muted small", textOutput("batch_outdir_note"))),
           tags$hr(),
           tags$strong("Per-dataset performance"),
@@ -3373,19 +3387,45 @@ server <- function(input, output, session) {
   output$batch_done <- reactive(isTRUE(bt$done))
   outputOptions(output, "batch_done", suspendWhenHidden = FALSE)
 
-  observeEvent(input$btn_batch, {
-    sel <- input$batch_datasets
-    if (length(sel) < 1) {
-      showNotification("Select at least one dataset.", type = "warning"); return()
-    }
-    expr_files <- file.path(.example_input_dir, sel)
-    names(expr_files) <- tools::file_path_sans_ext(basename(sel))
+  observeEvent(input$batch_select_all, {
+    updateSelectInput(session, "batch_datasets", selected = .example_inputs)
+  })
+  observeEvent(input$batch_clear_all, {
+    updateSelectInput(session, "batch_datasets", selected = character(0))
+  })
 
-    gsel <- input$batch_groups
-    is_toy <- identical(gsel, "__toy__")
-    groups_path <- if (is_toy)
-      system.file("extdata", "test_groups.gmt", package = "gsmR")
-    else file.path(.example_groups_dir, gsel)
+  observeEvent(input$btn_batch, {
+    # Datasets = selected examples + uploaded files (mixed).
+    sel <- input$batch_datasets
+    example_files <- if (length(sel)) {
+      stats::setNames(file.path(.example_input_dir, sel),
+                      tools::file_path_sans_ext(basename(sel)))
+    } else character(0)
+    up <- input$batch_upload
+    upload_files <- if (!is.null(up) && nrow(up)) {
+      stats::setNames(up$datapath, tools::file_path_sans_ext(up$name))
+    } else character(0)
+    expr_files <- c(example_files, upload_files)
+    if (length(expr_files) < 1) {
+      showNotification("Select at least one example or upload one expression file.",
+                       type = "warning"); return()
+    }
+    # Disambiguate duplicate dataset names (e.g. example + upload同名).
+    names(expr_files) <- make.unique(names(expr_files), sep = "_")
+
+    # Grouping: an upload overrides the example dropdown.
+    gup <- input$batch_groups_upload
+    if (!is.null(gup) && nrow(gup)) {
+      groups_path <- gup$datapath
+      groups_fmt  <- if (grepl("[.]gmt$", gup$name, ignore.case = TRUE)) "gmt" else "csv"
+    } else {
+      gsel <- input$batch_groups
+      is_toy <- identical(gsel, "__toy__")
+      groups_path <- if (is_toy)
+        system.file("extdata", "test_groups.gmt", package = "gsmR")
+      else file.path(.example_groups_dir, gsel)
+      groups_fmt <- if (is_toy) "gmt" else "auto"
+    }
 
     params <- list(
       score_method     = input$bp_score_method,
@@ -3406,7 +3446,7 @@ server <- function(input, output, session) {
       gsm_batch_new_state(expr_files, groups_path, params = params, outdir = outdir,
                           cores = input$bp_cores, max_resident = input$bp_max_resident,
                           discover = isTRUE(input$bp_discover),
-                          groups_format = if (is_toy) "gmt" else "auto"),
+                          groups_format = groups_fmt),
       error = function(e) {
         showNotification(paste("Batch init failed:", conditionMessage(e)),
                          type = "error", duration = 10); NULL
@@ -3512,6 +3552,17 @@ server <- function(input, output, session) {
     content = function(file) {
       req(bt$report)
       file.copy(bt$report, file, overwrite = TRUE)
+    }
+  )
+
+  # Zip the entire batch output tree (per-dataset .rds/tables/logs + combined + manifest).
+  output$dl_batch_all <- downloadHandler(
+    filename = function() paste0("gsmR_batch_results_",
+                                 format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip"),
+    content = function(file) {
+      req(bt$outdir, dir.exists(bt$outdir))
+      old <- setwd(dirname(bt$outdir)); on.exit(setwd(old), add = TRUE)
+      utils::zip(zipfile = file, files = basename(bt$outdir), flags = "-r9Xq")
     }
   )
 }
