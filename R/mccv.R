@@ -186,26 +186,43 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
     results <- lapply(seq_len(n_iterations), run_fold)
   }
 
-  # Filter out error folds if any occurred
+  aggregate_mccv_folds(results)
+}
+
+
+#' Aggregate MCCV fold results into a summary object
+#'
+#' Shared by [run_mccv()] and the multi-dataset batch runner ([run_batch()]) so
+#' both produce an identically-shaped result. Filters to successful folds, then
+#' computes per-metric mean/SD across them.
+#'
+#' @param results List of per-fold results (each with `$status` and `$metrics`),
+#'   as returned by [mccv_run_fold()].
+#' @return A list with `folds` (all fold results, including failures),
+#'   `metrics_summary` (data.frame of `Mean`/`SD` per metric), and `raw_metrics`
+#'   (one row per successful fold).
+#' @keywords internal
+aggregate_mccv_folds <- function(results) {
   successful_results <- Filter(function(res) res$status == "success", results)
-  
+
   if (length(successful_results) == 0) {
     stop("All MCCV folds failed. Check errors.")
   }
-  
+
   if (length(successful_results) < length(results)) {
-    warning(sprintf("%d folds failed during MCCV execution.", length(results) - length(successful_results)))
+    warning(sprintf("%d folds failed during MCCV execution.",
+                    length(results) - length(successful_results)))
   }
 
   # Aggregate metrics across all successful folds
   metrics_df <- do.call(rbind, lapply(successful_results, function(res) {
     as.data.frame(res$metrics)
   }))
-  
+
   mean_metrics <- colMeans(metrics_df, na.rm = TRUE)
   sd_metrics <- apply(metrics_df, 2, stats::sd, na.rm = TRUE)
-  
-  agg_results <- list(
+
+  list(
     folds = results,
     metrics_summary = data.frame(
       Mean = mean_metrics,
@@ -213,6 +230,4 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
     ),
     raw_metrics = metrics_df
   )
-  
-  agg_results
 }

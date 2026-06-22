@@ -7,7 +7,8 @@ An optimized R implementation of the G-S-M framework for transcriptomic data ana
 ## Key Features
 
 - **📂 Replicate Collapsing**: Collapse technical replicates using dynamic aggregation methods (mean, median, sum, first, etc.) with automated sample mapping and provenance tracking.
-- **📊 Statistical Pre-Scoring**: Filter out irrelevant biological groups using fast statistical tests (One-Way ANOVA, limma moderated statistics) before executing expensive machine learning runs.
+- **📊 Statistical Pre-Scoring**: Filter out irrelevant biological groups using fast statistical tests (one-way ANOVA, limma, size-calibrated Fisher, Empirical Brown, CAMERA, or GSVA/ssGSEA enrichment) before executing expensive machine learning runs.
+- **🧮 Multi-Dataset Batch**: Run many datasets against one grouping file in parallel via `run_batch()` or the GUI Batch tab — every `(dataset, fold)` work unit is scheduled over one shared core pool, with per-dataset artifacts plus a combined cross-dataset report (performance + consensus groups/biomarkers).
 - **⚡ Parallel Monte Carlo Cross-Validation (MCCV)**: Run multi-core stratified CV folds concurrently utilizing multi-process socket clusters on Windows and process-forking (`mclapply`) on Unix/macOS.
 - **🎯 Pluggable ML Backends**: Seamlessly train and score groups using **Random Forest (RF)**, **Support Vector Machines (SVM)**, **K-Nearest Neighbors (KNN)**, or **XGBoost** with dynamic hyperparameter forwarding via R's `...` ellipsis.
 - **🌋 De Novo Module Discovery**: Discover robust gene modules via RRA-ranked gene stability networks with Louvain clustering and bootstrap validation.
@@ -236,6 +237,51 @@ The pipeline produces two timestamped files:
 ```
 CLI flags (--method svm)  >  YAML file  >  Built-in defaults
 ```
+
+---
+
+## Multi-Dataset Batch (`run_batch`)
+
+Run the full G-S-M pipeline on **many expression datasets that share one grouping
+file**, all under a single shared set of parameters — from R or the GUI's **Batch**
+tab.
+
+```r
+run_batch(
+  expression_files = c("data/GDS2547.csv", "data/GDS2545.csv", "data/GDS3257.csv"),
+  groups_file      = "data/kegg.csv",
+  params           = list(score_method = "rf", mccv_iterations = 10, top_percent = 20),
+  outdir           = "gsmR_batch",
+  cores            = 8,    # total workers shared across ALL datasets' folds
+  max_resident     = 2     # datasets held in memory at once (bounds RAM)
+)
+```
+
+**Smart scheduling.** Every `(dataset, fold)` pair is flattened into one queue
+scheduled over a single pool of `cores` workers. Because a fold is the atomic,
+single-threaded unit, this keeps exactly `cores` folds busy at all times (no
+oversubscription), auto load-balances across datasets, and bounds memory by
+loading/releasing datasets just-in-time (`max_resident`). Per-fold seeding is
+preserved, so a dataset's batch results are identical to running it alone.
+
+**Outputs** under `outdir/`:
+
+```
+per_dataset/<name>/   gsmR_results_<name>_<ts>.rds   # GUI-openable session
+                      <name>_tables.xlsx | .zip       # full result tables
+                      <name>.log  +  *_params.yaml
+combined/   combined_report.xlsx | combined_tables.zip
+            #  PerDatasetMetrics, GroupConsensus, BiomarkerConsensus, Manifest
+batch_manifest.csv    batch.log
+```
+
+The combined report aggregates **per-dataset performance** plus **consensus group
+and biomarker rankings across datasets** (Robust Rank Aggregation). Each
+`per_dataset/<name>/*.rds` opens directly in the Shiny results tabs.
+
+In the **GUI Batch tab**: multi-select datasets + a grouping file, set parameters
+once, hit *Run Batch*, and watch live per-dataset progress; download the combined
+report when complete.
 
 ---
 

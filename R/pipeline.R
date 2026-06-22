@@ -58,42 +58,7 @@ run_pipeline <- function(params = NULL, outdir = ".", discover = TRUE, ...) {
   }
 
   # ── 2. Resolve parameters with defaults ─────────────────────────────────
-  p <- list(
-    expression_file    = cfg$expression_file    %||% NULL,
-    groups_file        = cfg$groups_file        %||% NULL,
-    groups_format      = cfg$groups_format      %||% "auto",
-    min_group_size     = as.integer(cfg$min_group_size %||% 5),
-    max_group_size     = as.integer(cfg$max_group_size %||% 500),
-    collapse_method    = cfg$collapse_method    %||% "none",
-    meta_conflict      = cfg$meta_conflict      %||% "first",
-    keep_original      = as.logical(cfg$keep_original %||% FALSE),
-    prescore_method    = cfg$prescore_method    %||% "anova",
-    top_percent        = as.numeric(cfg$top_percent %||% 20),
-    train_ratio        = as.numeric(cfg$train_ratio %||% 0.7),
-    prescore_seed      = as.integer(cfg$prescore_seed %||% 42),
-    score_method       = cfg$score_method       %||% "rf",
-    rf_ntree           = as.integer(cfg$rf_ntree %||% 500),
-    svm_kernel         = cfg$svm_kernel         %||% "radial",
-    svm_cost           = as.numeric(cfg$svm_cost %||% 1),
-    svm_gamma          = cfg$svm_gamma          %||% "auto",
-    knn_k              = as.integer(cfg$knn_k %||% 5),
-    shave_genes        = as.logical(cfg$shave_genes %||% TRUE),
-    fdr_alpha          = as.numeric(cfg$fdr_alpha %||% 0.05),
-    normalize_z        = as.logical(cfg$normalize_z %||% FALSE),
-    score_scope        = cfg$score_scope        %||% "selected",
-    n_top_groups       = as.integer(cfg$n_top_groups %||% 10),
-    score_seed         = as.integer(cfg$score_seed %||% 44),
-    run_mccv_mode      = as.logical(cfg$run_mccv_mode %||% TRUE),
-    mccv_iterations    = as.integer(cfg$mccv_iterations %||% 10),
-    model_method       = cfg$model_method       %||% "same",
-    mccv_train_ratio   = as.numeric(cfg$mccv_train_ratio %||% 0.7),
-    mccv_cores         = as.integer(cfg$mccv_cores %||% 1),
-    detect_mode        = cfg$detect_mode        %||% "abs",
-    detect_top_genes   = as.integer(cfg$detect_top_genes %||% 200),
-    detect_min_freq    = as.numeric(cfg$detect_min_freq %||% 0.5),
-    detect_resolution  = as.numeric(cfg$detect_resolution %||% 1),
-    detect_nboot       = as.integer(cfg$detect_nboot %||% 50)
-  )
+  p <- gsm_resolve_params(cfg)
 
   # Validate required files
   if (is.null(p$expression_file) || !nzchar(p$expression_file))
@@ -289,60 +254,15 @@ run_pipeline <- function(params = NULL, outdir = ".", discover = TRUE, ...) {
   ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
 
   # Save session .rds (same format as Shiny)
-  session_data <- list(
-    # Data
-    expr_data        = expr_data,
-    groups           = groups,
-    dataset          = dataset,
-    dataset_name     = dataset_name,
-    loaded           = TRUE,
-    # Collapse (not run in CLI — placeholder)
-    collapse_result  = NULL,
-    collapsed        = FALSE,
-    time_collapse    = NULL,
-    # Pre-score
-    prescore_groups  = prescore_groups,
-    prescore_scores  = prescore_scores,
-    prescore_nkeep   = prescore_nkeep,
-    prescored        = !is.null(prescore_groups),
-    train_idx        = train_idx,
-    time_prescore    = NULL,
-    # Score
-    score_results    = score_results,
-    final_model      = final_model,
-    accumulative     = accumulative,
-    mccv_results     = mccv_results,
-    scored           = TRUE,
-    score_summary    = score_summary,
-    time_score       = time_score,
-    # Discovery
-    detect           = detect,
-    permtest         = NULL,
-    mccv_group_summary = NULL,
-    # Settings (for Shiny UI state restoration)
-    settings = list(
-      score_method      = p$score_method,
-      run_mccv_mode     = p$run_mccv_mode,
-      mccv_iterations   = p$mccv_iterations,
-      model_method      = p$model_method,
-      mccv_train_ratio  = p$mccv_train_ratio,
-      score_scope       = p$score_scope,
-      n_top_groups      = p$n_top_groups,
-      score_seed        = p$score_seed,
-      top_percent       = p$top_percent,
-      normalize         = p$normalize_z,
-      detect_mode       = p$detect_mode,
-      detect_top_genes  = p$detect_top_genes,
-      detect_min_freq   = p$detect_min_freq,
-      detect_resolution = p$detect_resolution,
-      detect_nboot      = p$detect_nboot
-    ),
-    # Metadata
-    saved_at     = Sys.time(),
-    r_version    = R.version.string,
-    gsmR_version = tryCatch(as.character(utils::packageVersion("gsmR")),
-                            error = function(e) "unknown"),
-    source       = "cli_pipeline"
+  session_data <- gsm_build_session(
+    expr_data = expr_data, groups = groups, dataset = dataset,
+    dataset_name = dataset_name, p = p,
+    mccv_results = mccv_results, score_results = score_results,
+    final_model = final_model, accumulative = accumulative,
+    prescore_groups = prescore_groups, prescore_scores = prescore_scores,
+    prescore_nkeep = prescore_nkeep, train_idx = train_idx,
+    score_summary = score_summary, time_score = time_score,
+    detect = detect, source = "cli_pipeline"
   )
 
   rds_path <- file.path(outdir, sprintf("gsmR_results_%s_%s.rds", dataset_name, ts))
@@ -402,4 +322,133 @@ run_pipeline <- function(params = NULL, outdir = ".", discover = TRUE, ...) {
   if (secs < 60) return(sprintf("%.1fs", secs))
   if (secs < 3600) return(sprintf("%.0fm %.0fs", secs %/% 60, secs %% 60))
   sprintf("%.0fh %.0fm", secs %/% 3600, (secs %% 3600) %/% 60)
+}
+
+#' Resolve gsmR parameters against their defaults
+#'
+#' Merges a (possibly partial) configuration list with the canonical defaults
+#' used by [run_pipeline()]. Shared with the multi-dataset batch runner so both
+#' resolve parameters identically. Does **not** validate input files — callers
+#' that require them (e.g. [run_pipeline()]) check separately, since the batch
+#' runner sets `expression_file` per dataset.
+#'
+#' @param cfg A named list of parameters (any subset; missing keys take defaults).
+#' @return A fully-populated named list of resolved parameters.
+#' @keywords internal
+gsm_resolve_params <- function(cfg = list()) {
+  list(
+    expression_file    = cfg$expression_file    %||% NULL,
+    groups_file        = cfg$groups_file        %||% NULL,
+    groups_format      = cfg$groups_format      %||% "auto",
+    min_group_size     = as.integer(cfg$min_group_size %||% 5),
+    max_group_size     = as.integer(cfg$max_group_size %||% 500),
+    collapse_method    = cfg$collapse_method    %||% "none",
+    meta_conflict      = cfg$meta_conflict      %||% "first",
+    keep_original      = as.logical(cfg$keep_original %||% FALSE),
+    prescore_method    = cfg$prescore_method    %||% "anova",
+    top_percent        = as.numeric(cfg$top_percent %||% 20),
+    train_ratio        = as.numeric(cfg$train_ratio %||% 0.7),
+    prescore_seed      = as.integer(cfg$prescore_seed %||% 42),
+    score_method       = cfg$score_method       %||% "rf",
+    rf_ntree           = as.integer(cfg$rf_ntree %||% 500),
+    svm_kernel         = cfg$svm_kernel         %||% "radial",
+    svm_cost           = as.numeric(cfg$svm_cost %||% 1),
+    svm_gamma          = cfg$svm_gamma          %||% "auto",
+    knn_k              = as.integer(cfg$knn_k %||% 5),
+    shave_genes        = as.logical(cfg$shave_genes %||% TRUE),
+    fdr_alpha          = as.numeric(cfg$fdr_alpha %||% 0.05),
+    normalize_z        = as.logical(cfg$normalize_z %||% FALSE),
+    score_scope        = cfg$score_scope        %||% "selected",
+    n_top_groups       = as.integer(cfg$n_top_groups %||% 10),
+    score_seed         = as.integer(cfg$score_seed %||% 44),
+    run_mccv_mode      = as.logical(cfg$run_mccv_mode %||% TRUE),
+    mccv_iterations    = as.integer(cfg$mccv_iterations %||% 10),
+    model_method       = cfg$model_method       %||% "same",
+    mccv_train_ratio   = as.numeric(cfg$mccv_train_ratio %||% 0.7),
+    mccv_cores         = as.integer(cfg$mccv_cores %||% 1),
+    detect_mode        = cfg$detect_mode        %||% "abs",
+    detect_top_genes   = as.integer(cfg$detect_top_genes %||% 200),
+    detect_min_freq    = as.numeric(cfg$detect_min_freq %||% 0.5),
+    detect_resolution  = as.numeric(cfg$detect_resolution %||% 1),
+    detect_nboot       = as.integer(cfg$detect_nboot %||% 50)
+  )
+}
+
+#' Assemble a gsmR session object (the `.rds` payload)
+#'
+#' Builds the session list saved by [run_pipeline()] and loaded by the Shiny app.
+#' Factored out so the multi-dataset batch runner writes per-dataset `.rds` files
+#' with an identical shape — making them openable in the existing results tabs.
+#'
+#' @param expr_data,groups,dataset,dataset_name Loaded inputs and built dataset.
+#' @param p Resolved parameter list (see [gsm_resolve_params()]).
+#' @param mccv_results,score_results,final_model,accumulative Scoring outputs.
+#' @param prescore_groups,prescore_scores,prescore_nkeep,train_idx Pre-score outputs.
+#' @param score_summary,time_score,detect Run summary, timing, discovery output.
+#' @param source A short tag identifying the producer (e.g. "cli_pipeline",
+#'   "batch").
+#' @return A named list (the session payload) ready for [saveRDS()].
+#' @keywords internal
+gsm_build_session <- function(expr_data, groups, dataset, dataset_name, p,
+                              mccv_results = NULL, score_results = NULL,
+                              final_model = NULL, accumulative = NULL,
+                              prescore_groups = NULL, prescore_scores = NULL,
+                              prescore_nkeep = NULL, train_idx = NULL,
+                              score_summary = NULL, time_score = NULL,
+                              detect = NULL, source = "cli_pipeline") {
+  list(
+    # Data
+    expr_data        = expr_data,
+    groups           = groups,
+    dataset          = dataset,
+    dataset_name     = dataset_name,
+    loaded           = TRUE,
+    # Collapse (not run in CLI/batch — placeholder)
+    collapse_result  = NULL,
+    collapsed        = FALSE,
+    time_collapse    = NULL,
+    # Pre-score
+    prescore_groups  = prescore_groups,
+    prescore_scores  = prescore_scores,
+    prescore_nkeep   = prescore_nkeep,
+    prescored        = !is.null(prescore_groups),
+    train_idx        = train_idx,
+    time_prescore    = NULL,
+    # Score
+    score_results    = score_results,
+    final_model      = final_model,
+    accumulative     = accumulative,
+    mccv_results     = mccv_results,
+    scored           = TRUE,
+    score_summary    = score_summary,
+    time_score       = time_score,
+    # Discovery
+    detect           = detect,
+    permtest         = NULL,
+    mccv_group_summary = NULL,
+    # Settings (for Shiny UI state restoration)
+    settings = list(
+      score_method      = p$score_method,
+      run_mccv_mode     = p$run_mccv_mode,
+      mccv_iterations   = p$mccv_iterations,
+      model_method      = p$model_method,
+      mccv_train_ratio  = p$mccv_train_ratio,
+      score_scope       = p$score_scope,
+      n_top_groups      = p$n_top_groups,
+      score_seed        = p$score_seed,
+      top_percent       = p$top_percent,
+      normalize         = p$normalize_z,
+      detect_mode       = p$detect_mode,
+      detect_top_genes  = p$detect_top_genes,
+      detect_min_freq   = p$detect_min_freq,
+      detect_resolution = p$detect_resolution,
+      detect_nboot      = p$detect_nboot
+    ),
+    # Metadata
+    saved_at     = Sys.time(),
+    r_version    = R.version.string,
+    gsmR_version = tryCatch(as.character(utils::packageVersion("gsmR")),
+                            error = function(e) "unknown"),
+    source       = source
+  )
 }

@@ -151,6 +151,27 @@ detect_resolution: {detect_resolution}
 
 # Number of bootstraps for robustness testing.
 detect_nboot: {detect_nboot}
+
+# ------------------------------------------------------------------------------
+# 7. Multi-Dataset Batch (optional; used by run_batch())
+# ------------------------------------------------------------------------------
+# When set, run_batch() processes EVERY listed expression file against the single
+# groups_file above, sharing all parameters in this file. All other settings
+# (pre-scoring, scoring, MCCV, discovery) apply to each dataset.
+
+# List of expression files to process as a batch (uncomment and edit):
+# expression_files:
+#   - 'data/GDS1.csv'
+#   - 'data/GDS2.csv'
+
+# Output directory root for per-dataset results + the combined report.
+batch_outdir: 'gsmR_batch'
+
+# Total worker cores for the shared (dataset x fold) pool. Blank = detectCores()-1.
+batch_cores: {mccv_cores}
+
+# Maximum datasets held in memory at once (bounds peak RAM; folds still saturate cores).
+max_resident: 3
 "
 }
 

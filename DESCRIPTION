@@ -1,6 +1,6 @@
 Package: gsmR
 Title: Grouping-Scoring-Modeling (G-S-M) Framework for R
-Version: 0.1.0
+Version: 0.2.0
 Authors@R: c(
     person("Malik", "Yousef", email = "malik.yousef@gmail.com", role = c("aut")),
     person("Maham", "Khokhar", email = "mahamkhokar96@gmail.com", role = c("aut")),
