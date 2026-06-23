@@ -1001,6 +1001,103 @@ ui <- page_navbar(
     )
   ),
 
+  # ── Tab 6: Batch ───────────────────────────────────────────────────
+  nav_panel(
+    value = "batch",
+    title = nav_step_title("6", "\U0001F9EE", "Batch"),
+    layout_sidebar(
+      sidebar = sidebar(
+        title = "Batch Setup", width = 360,
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("\U0001F9EC Datasets"),
+          help_tip("Pick built-in examples and/or upload your own expression files. Uploads and selected examples are combined. Each dataset runs against the single grouping file below, sharing the parameters here; all (dataset x fold) work units run over one shared core pool.")
+        ),
+        selectInput("batch_datasets", "Built-in examples",
+                    choices = .example_inputs, multiple = TRUE),
+        tags$div(style = "display:flex; gap:6px; margin-top:-6px; margin-bottom:8px;",
+          actionButton("batch_select_all", "Select all",
+                       class = "btn-outline-light btn-sm", style = "flex:1;"),
+          actionButton("batch_clear_all", "Clear all",
+                       class = "btn-outline-light btn-sm", style = "flex:1;")),
+        fileInput("batch_upload", "…or upload expression files",
+                  multiple = TRUE, accept = c(".csv", ".tsv", ".txt")),
+        tags$hr(),
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("\U0001F5C2️ Grouping file"),
+          help_tip("One grouping file shared by every dataset. Pick an example, or upload your own (2-column gene,group CSV or GMT). An upload overrides the dropdown.")),
+        selectInput("batch_groups", "Built-in example", choices = .groups_choices),
+        fileInput("batch_groups_upload", "…or upload grouping file",
+                  accept = c(".csv", ".tsv", ".gmt", ".txt")),
+        tags$hr(),
+        selectInput("bp_score_method", "Classifier",
+                    choices = c("Random Forest" = "rf",
+                                "Support Vector Machine" = "svm",
+                                "K-Nearest Neighbors" = "knn",
+                                "XGBoost" = "xgb")),
+        selectInput("bp_prescore_method", "Pre-scoring",
+                    choices = c("ANOVA" = "anova", "limma (moderated)" = "limma",
+                                "Fisher (chi-square)" = "fisher_chisq",
+                                "Empirical Brown" = "ebm",
+                                "CAMERA (2-class)" = "camera",
+                                "GSVA / ssGSEA" = "gsva", "None" = "none")),
+        layout_columns(col_widths = c(6, 6),
+          numericInput("bp_mccv_iterations", "MCCV iters", value = 10, min = 1, max = 500),
+          numericInput("bp_top_percent", "Pre-score top %", value = 100, min = 1, max = 100)),
+        layout_columns(col_widths = c(6, 6),
+          numericInput("bp_train_ratio", "Train ratio", value = 0.7, min = 0.5, max = 0.95, step = 0.05),
+          numericInput("bp_n_top_groups", "Top-N groups", value = 10, min = 1)),
+        selectInput("bp_model_method", "Final modeling",
+                    choices = c("Same as scoring" = "same", "Random Forest" = "rf",
+                                "SVM" = "svm", "KNN" = "knn", "XGBoost" = "xgb")),
+        layout_columns(col_widths = c(6, 6),
+          checkboxInput("bp_shave", "Gene shaving", value = TRUE),
+          checkboxInput("bp_normalize", "Z-normalize", value = FALSE)),
+        checkboxInput("bp_discover", "Module discovery (per dataset)", value = FALSE),
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("Speed / memory"),
+          help_tip("CPU cores = total workers shared across ALL datasets' folds. Max resident = how many datasets are held in memory at once (bounds RAM; folds still saturate all cores).")
+        ),
+        layout_columns(col_widths = c(7, 5),
+          sliderInput("bp_cores", "CPU cores", min = 1, max = parallel::detectCores(),
+                      value = max(1, parallel::detectCores() - 1), step = 1),
+          numericInput("bp_max_resident", "Max resident", value = 2, min = 1, max = 20)),
+        layout_columns(col_widths = c(6, 6),
+          numericInput("bp_seed", "Seed", value = 44, min = 1),
+          selectInput("bp_report_format", "Report",
+                      choices = c("Excel (.xlsx)" = "xlsx", "CSV (.zip)" = "csv"))),
+        tags$hr(),
+        actionButton("btn_batch", "\U0001F680 Run Batch",
+                     class = "btn-primary btn-lg w-100")
+      ),
+      # Main panel
+      uiOutput("batch_overall"),
+      card(
+        card_header("\U0001F4CA Per-dataset progress"),
+        uiOutput("batch_status")
+      ),
+      conditionalPanel(
+        condition = "output.batch_done",
+        card(
+          card_header("\U0001F9EC Combined cross-dataset report"),
+          layout_columns(col_widths = c(4, 4, 4),
+            downloadButton("dl_batch_report", "\U0001F4E5 Combined report",
+                           class = "btn-primary w-100"),
+            downloadButton("dl_batch_all", "\U0001F4E6 All results (zip)",
+                           class = "btn-outline-light w-100"),
+            tags$div(class = "text-muted small", textOutput("batch_outdir_note"))),
+          tags$hr(),
+          tags$strong("Per-dataset performance"),
+          DTOutput("batch_combined_metrics")
+        )
+      ),
+      card(
+        card_header("\U0001F4DC Batch log"),
+        tags$pre(style = "max-height:240px; overflow:auto; font-size:0.8rem;",
+                 textOutput("batch_log"))
+      )
+    )
+  ),
+
   # ── Footer ─────────────────────────────────────────────────────────────
   nav_spacer(),
   nav_item(
@@ -3273,6 +3370,201 @@ server <- function(input, output, session) {
       )
     })
   })
+
+  # \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+  # Multi-dataset batch processing
+  #
+  # Drives the shared scheduler (gsm_batch_new_state / gsm_batch_step) from a
+  # non-blocking observe()/invalidateLater() loop \u2014 the same concurrency model as
+  # the live MCCV view, but the work queue is every (dataset, fold) pair over one
+  # shared core pool. Per-dataset .rds/tables/logs and a combined report are
+  # written under a per-session temp directory.
+  # \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+  bt <- reactiveValues(active = FALSE, st = NULL, snap = NULL, done = FALSE,
+                       outdir = NULL, report = NULL, total = 0L,
+                       report_format = "xlsx")
+
+  output$batch_done <- reactive(isTRUE(bt$done))
+  outputOptions(output, "batch_done", suspendWhenHidden = FALSE)
+
+  observeEvent(input$batch_select_all, {
+    updateSelectInput(session, "batch_datasets", selected = .example_inputs)
+  })
+  observeEvent(input$batch_clear_all, {
+    updateSelectInput(session, "batch_datasets", selected = character(0))
+  })
+
+  observeEvent(input$btn_batch, {
+    # Datasets = selected examples + uploaded files (mixed).
+    sel <- input$batch_datasets
+    example_files <- if (length(sel)) {
+      stats::setNames(file.path(.example_input_dir, sel),
+                      tools::file_path_sans_ext(basename(sel)))
+    } else character(0)
+    up <- input$batch_upload
+    upload_files <- if (!is.null(up) && nrow(up)) {
+      stats::setNames(up$datapath, tools::file_path_sans_ext(up$name))
+    } else character(0)
+    expr_files <- c(example_files, upload_files)
+    if (length(expr_files) < 1) {
+      showNotification("Select at least one example or upload one expression file.",
+                       type = "warning"); return()
+    }
+    # Disambiguate duplicate dataset names (e.g. example + upload同名).
+    names(expr_files) <- make.unique(names(expr_files), sep = "_")
+
+    # Grouping: an upload overrides the example dropdown.
+    gup <- input$batch_groups_upload
+    if (!is.null(gup) && nrow(gup)) {
+      groups_path <- gup$datapath
+      groups_fmt  <- if (grepl("[.]gmt$", gup$name, ignore.case = TRUE)) "gmt" else "csv"
+    } else {
+      gsel <- input$batch_groups
+      is_toy <- identical(gsel, "__toy__")
+      groups_path <- if (is_toy)
+        system.file("extdata", "test_groups.gmt", package = "gsmR")
+      else file.path(.example_groups_dir, gsel)
+      groups_fmt <- if (is_toy) "gmt" else "auto"
+    }
+
+    params <- list(
+      score_method     = input$bp_score_method,
+      prescore_method  = input$bp_prescore_method,
+      mccv_iterations  = input$bp_mccv_iterations,
+      top_percent      = input$bp_top_percent,
+      mccv_train_ratio = input$bp_train_ratio,
+      n_top_groups     = input$bp_n_top_groups,
+      model_method     = input$bp_model_method,
+      shave_genes      = input$bp_shave,
+      normalize_z      = input$bp_normalize,
+      score_seed       = input$bp_seed
+    )
+    outdir <- file.path(tempdir(),
+                        paste0("gsmR_batch_", format(Sys.time(), "%Y%m%d_%H%M%S")))
+
+    st <- tryCatch(
+      gsmR:::gsm_batch_new_state(expr_files, groups_path, params = params, outdir = outdir,
+                          cores = input$bp_cores, max_resident = input$bp_max_resident,
+                          discover = isTRUE(input$bp_discover),
+                          groups_format = groups_fmt),
+      error = function(e) {
+        showNotification(paste("Batch init failed:", conditionMessage(e)),
+                         type = "error", duration = 10); NULL
+      })
+    if (is.null(st)) return()
+
+    bt$st <- st; bt$active <- TRUE; bt$done <- FALSE; bt$outdir <- outdir
+    bt$total <- length(st$names) * st$n_iter
+    bt$report_format <- input$bp_report_format
+    bt$snap <- gsmR:::gsm_batch_snapshot(st)
+    showNotification(sprintf("\U0001F680 Batch started: %d datasets on %d cores",
+                             length(st$names), st$cores), type = "message", duration = 5)
+  })
+
+  # Non-blocking scheduler loop
+  observe({
+    req(bt$active)
+    st <- bt$st
+    isolate({
+      gsmR:::gsm_batch_step(st)
+      bt$snap <- gsmR:::gsm_batch_snapshot(st)
+      if (!isTRUE(st$active)) {
+        fmt <- if (is.null(bt$report_format)) "xlsx" else bt$report_format
+        tryCatch(gsmR:::gsm_write_batch_outputs(st, format = fmt),
+                 error = function(e) NULL)
+        cf <- file.path(st$outdir, "combined",
+                        if (fmt == "xlsx") "combined_report.xlsx" else "combined_tables.zip")
+        bt$report <- if (file.exists(cf)) cf else NULL
+        bt$active <- FALSE; bt$done <- TRUE
+        showNotification("\u2705 Batch complete!", type = "message")
+      }
+    })
+    if (isTRUE(bt$active)) invalidateLater(400)
+  })
+
+  output$batch_overall <- renderUI({
+    sn <- bt$snap
+    if (is.null(sn)) return(tags$div(class = "text-muted",
+      "Select datasets + a grouping file, set parameters, then click Run Batch."))
+    done_folds <- sum(sn$done_count)
+    pct <- if (bt$total > 0) round(100 * done_folds / bt$total) else 0
+    n_done <- sum(sn$status == "done"); n_tot <- length(sn$status)
+    n_err <- sum(sn$status == "error")
+    tags$div(
+      tags$h5(sprintf("%s \u2014 %d/%d datasets done%s | %d/%d folds (%d%%) | running %d, queued %d",
+                      if (isTRUE(sn$all_done)) "\u2705 Complete" else "\u23f3 Running",
+                      n_done, n_tot, if (n_err > 0) sprintf(", %d failed", n_err) else "",
+                      done_folds, bt$total, pct, sn$running, sn$queued)),
+      tags$div(class = "progress", style = "height:22px;",
+        tags$div(class = "progress-bar bg-success", role = "progressbar",
+                 style = sprintf("width:%d%%;", pct), sprintf("%d%%", pct)))
+    )
+  })
+
+  output$batch_status <- renderUI({
+    sn <- bt$snap
+    if (is.null(sn)) return(tags$div(class = "text-muted", "No batch running."))
+    rows <- lapply(names(sn$status), function(nm) {
+      stt <- sn$status[[nm]]; dc <- sn$done_count[[nm]]
+      badge <- switch(stt, done = "success", running = "info",
+                      error = "danger", loading = "warning", "secondary")
+      frac <- if (sn$n_iter > 0) round(100 * dc / sn$n_iter) else 0
+      tags$div(class = "d-flex align-items-center gap-2 mb-2",
+        tags$span(class = sprintf("badge bg-%s", badge),
+                  style = "min-width:64px;", stt),
+        tags$strong(style = "min-width:160px;", nm),
+        tags$div(class = "progress flex-grow-1", style = "height:16px;",
+          tags$div(class = "progress-bar", role = "progressbar",
+                   style = sprintf("width:%d%%;", frac))),
+        tags$span(class = "text-muted small", sprintf("%d/%d", dc, sn$n_iter)))
+    })
+    do.call(tags$div, rows)
+  })
+
+  output$batch_log <- renderText({
+    sn <- bt$snap
+    if (is.null(sn)) return("")
+    paste(sn$log_tail, collapse = "\n")
+  })
+
+  output$batch_outdir_note <- renderText({
+    if (is.null(bt$outdir)) "" else
+      paste0("Per-dataset .rds + tables + logs under: ",
+             file.path(bt$outdir, "per_dataset"))
+  })
+
+  output$batch_combined_metrics <- renderDT({
+    req(bt$done, bt$st)
+    res <- bt$st$results
+    if (length(res) == 0) return(NULL)
+    tb <- tryCatch(gsm_combined_metrics(res), error = function(e) NULL)
+    req(tb)
+    num <- vapply(tb, is.numeric, logical(1))
+    tb[num] <- lapply(tb[num], function(x) round(x, 3))
+    DT::datatable(tb, rownames = FALSE,
+                  options = list(scrollX = TRUE, dom = "t", pageLength = 50))
+  })
+
+  output$dl_batch_report <- downloadHandler(
+    filename = function() {
+      if (is.null(bt$report)) "combined_report.zip" else basename(bt$report)
+    },
+    content = function(file) {
+      req(bt$report)
+      file.copy(bt$report, file, overwrite = TRUE)
+    }
+  )
+
+  # Zip the entire batch output tree (per-dataset .rds/tables/logs + combined + manifest).
+  output$dl_batch_all <- downloadHandler(
+    filename = function() paste0("gsmR_batch_results_",
+                                 format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip"),
+    content = function(file) {
+      req(bt$outdir, dir.exists(bt$outdir))
+      old <- setwd(dirname(bt$outdir)); on.exit(setwd(old), add = TRUE)
+      utils::zip(zipfile = file, files = basename(bt$outdir), flags = "-r9Xq")
+    }
+  )
 }
 
 # ══════════════════════════════════════════════════════════════════════════════

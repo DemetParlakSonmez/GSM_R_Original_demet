@@ -428,7 +428,9 @@ gsm_write_csv_zip <- function(tables, file, prefix = "GSM") {
   on.exit(unlink(dir, recursive = TRUE), add = TRUE)
   paths <- character(0)
   for (nm in names(tables)) {
-    label <- .csv_name_map[[nm]] %|null|% nm
+    # Safe lookup: `[[` on a named vector errors for absent keys, so guard with
+    # %in% (combined-report tables use names outside the single-dataset map).
+    label <- if (nm %in% names(.csv_name_map)) .csv_name_map[[nm]] else nm
     p <- file.path(dir, sprintf("%s_%s.csv", prefix, label))
     utils::write.csv(tables[[nm]], p, row.names = FALSE)
     paths <- c(paths, p)
