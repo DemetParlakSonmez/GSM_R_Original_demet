@@ -101,7 +101,24 @@ gsm_batch_new_state <- function(expression_files, groups_file, params = list(),
   st$all_done   <- FALSE
   st$outputs_written <- FALSE
   st$t0         <- proc.time()[["elapsed"]]
+  st$started_at <- Sys.time()
+  st$ended_at   <- NULL
   st
+}
+
+#' Build one manifest row with a fixed column set (so rows always rbind)
+#' @keywords internal
+.gsm_manifest_row <- function(dataset, status, n_ok = 0L, samples = NA_integer_,
+                              genes = NA_integer_, groups = NA_integer_,
+                              best_k = NA_real_, acc = NA_real_, fm = NA_real_,
+                              auc = NA_real_, elapsed = NA_real_,
+                              rds = NA_character_, error = NA_character_) {
+  data.frame(
+    Dataset = dataset, Status = status, N_folds_ok = as.integer(n_ok),
+    Samples = samples, Genes = genes, Groups = groups,
+    Mean_Best_k = round(best_k, 2), Mean_Accuracy = acc, Mean_F_measure = fm,
+    Mean_AUC = auc, Elapsed_sec = round(elapsed, 1), RDS = rds, Error = error,
+    stringsAsFactors = FALSE)
 }
 
 #' Append a line to the batch log (ring buffer + on-disk batch.log)
@@ -159,11 +176,8 @@ gsm_batch_snapshot <- function(st) {
       TRUE
     }, error = function(e) {
       st$status[nm] <- "error"
-      st$manifest[[length(st$manifest) + 1L]] <- data.frame(
-        Dataset = nm, Status = "error", N_folds_ok = 0L,
-        Mean_Accuracy = NA_real_, Mean_F_measure = NA_real_, Mean_AUC = NA_real_,
-        RDS = NA_character_, Error = conditionMessage(e),
-        stringsAsFactors = FALSE)
+      st$manifest[[length(st$manifest) + 1L]] <-
+        .gsm_manifest_row(nm, "error", error = conditionMessage(e))
       gsm_batch_log(st, sprintf("ERROR loading '%s': %s", nm, conditionMessage(e)))
       FALSE
     })
@@ -264,10 +278,9 @@ gsm_batch_snapshot <- function(st) {
 
   if (is.null(agg)) {
     st$status[nm] <- "error"
-    st$manifest[[length(st$manifest) + 1L]] <- data.frame(
-      Dataset = nm, Status = "error", N_folds_ok = 0L,
-      Mean_Accuracy = NA_real_, Mean_F_measure = NA_real_, Mean_AUC = NA_real_,
-      RDS = NA_character_, Error = "all folds failed", stringsAsFactors = FALSE)
+    st$manifest[[length(st$manifest) + 1L]] <- .gsm_manifest_row(
+      nm, "error", samples = ds$params$n_samples, genes = ds$params$n_genes,
+      groups = ds$params$n_groups, elapsed = elapsed, error = "all folds failed")
     gsm_batch_log(st, sprintf("Dataset '%s' FAILED (all folds errored)", nm))
   } else {
     n_ok <- sum(vapply(folds, function(r) is.list(r) && identical(r$status, "success"),
@@ -327,14 +340,21 @@ gsm_batch_snapshot <- function(st) {
       file.path(dsdir, paste0(nm, ".log"))), error = function(e) NULL)
 
     getm <- function(k) tryCatch(mm[k, "Mean"], error = function(e) NA_real_)
+    best_k_mean <- mean(vapply(folds, function(fr)
+      if (is.list(fr) && identical(fr$status, "success"))
+        as.numeric(fr$best_k %||% NA_real_) else NA_real_, numeric(1)), na.rm = TRUE)
     st$results[[nm]] <- list(name = nm, mccv = agg, summary = score_summary,
                              rds = rds_path, metrics_summary = mm, n_ok = n_ok,
-                             elapsed = elapsed, detect = detect)
-    st$manifest[[length(st$manifest) + 1L]] <- data.frame(
-      Dataset = nm, Status = "success", N_folds_ok = n_ok,
-      Mean_Accuracy = getm("Accuracy"), Mean_F_measure = getm("F_measure"),
-      Mean_AUC = getm("AUC"), RDS = rds_path, Error = NA_character_,
-      stringsAsFactors = FALSE)
+                             elapsed = elapsed, detect = detect,
+                             n_samples = ds$params$n_samples,
+                             n_genes = ds$params$n_genes,
+                             n_groups = ds$params$n_groups,
+                             best_k_mean = best_k_mean)
+    st$manifest[[length(st$manifest) + 1L]] <- .gsm_manifest_row(
+      nm, "success", n_ok = n_ok, samples = ds$params$n_samples,
+      genes = ds$params$n_genes, groups = ds$params$n_groups,
+      best_k = best_k_mean, acc = getm("Accuracy"), fm = getm("F_measure"),
+      auc = getm("AUC"), elapsed = elapsed, rds = rds_path)
     st$status[nm] <- "done"
     gsm_batch_log(st, sprintf("Dataset '%s' DONE: %d/%d folds, mean acc=%s, in %s",
                               nm, n_ok, st$n_iter, round(getm("Accuracy"), 3),
@@ -375,14 +395,61 @@ gsm_batch_step <- function(st) {
   invisible(st)
 }
 
-#' Write the combined cross-dataset report + manifest (idempotent)
+#' Full run-info: every chosen parameter + environment + timing (key/value)
+#' @keywords internal
+gsm_batch_run_info <- function(st) {
+  p <- st$p
+  n_ok <- sum(st$status == "done"); n_err <- sum(st$status == "error")
+  total <- proc.time()[["elapsed"]] - st$t0
+  ended <- if (!is.null(st$ended_at)) st$ended_at else Sys.time()
+  kv <- function(k, v) data.frame(Parameter = k, Value = as.character(v),
+                                  stringsAsFactors = FALSE)
+  do.call(rbind, list(
+    kv("Run started",            format(st$started_at, "%Y-%m-%d %H:%M:%S")),
+    kv("Run finished",           format(ended, "%Y-%m-%d %H:%M:%S")),
+    kv("Total wall-clock",       .fmt_time(total)),
+    kv("Total wall-clock (sec)", round(total, 1)),
+    kv("Datasets (total)",       length(st$names)),
+    kv("Datasets (succeeded)",   n_ok),
+    kv("Datasets (failed)",      n_err),
+    kv("Datasets",               paste(st$names, collapse = ", ")),
+    kv("Grouping file",          basename(st$groups_file)),
+    kv("Classifier (scoring)",   p$score_method),
+    kv("Final modeling",         st$actual_model_method),
+    kv("Pre-scoring method",     p$prescore_method),
+    kv("Pre-score top %",        p$top_percent),
+    kv("MCCV iterations",        p$mccv_iterations),
+    kv("Train ratio",            p$mccv_train_ratio),
+    kv("Top-N groups",           p$n_top_groups),
+    kv("Gene shaving",           p$shave_genes),
+    kv("FDR alpha (shaving)",    p$fdr_alpha),
+    kv("Z-normalize",            p$normalize_z),
+    kv("Module discovery",       st$discover),
+    kv("Seed",                   p$score_seed),
+    kv("Group size range",       paste0(p$min_group_size, " - ", p$max_group_size)),
+    kv("CPU cores",              st$cores),
+    kv("Max resident datasets",  st$max_resident),
+    kv("Output directory",       st$outdir),
+    kv("Platform",               .Platform$OS.type),
+    kv("R version",              R.version.string),
+    kv("gsmR version",           tryCatch(as.character(utils::packageVersion("gsmR")),
+                                          error = function(e) "unknown"))
+  ))
+}
+
+#' Write the combined cross-dataset report + manifest + run-info (idempotent)
 #' @keywords internal
 gsm_write_batch_outputs <- function(st, format = c("xlsx", "csv")) {
   if (isTRUE(st$outputs_written)) return(invisible(NULL))
   format <- match.arg(format)
+  st$ended_at <- Sys.time()
   manifest <- if (length(st$manifest))
     do.call(rbind, st$manifest) else data.frame()
   utils::write.csv(manifest, file.path(st$outdir, "batch_manifest.csv"),
+                   row.names = FALSE)
+
+  run_info <- gsm_batch_run_info(st)
+  utils::write.csv(run_info, file.path(st$outdir, "batch_run_info.csv"),
                    row.names = FALSE)
 
   ok_results <- Filter(function(r) !is.null(r$mccv), st$results)
@@ -390,7 +457,7 @@ gsm_write_batch_outputs <- function(st, format = c("xlsx", "csv")) {
     file <- file.path(st$outdir, "combined",
                       if (format == "xlsx") "combined_report.xlsx" else "combined_tables.zip")
     tryCatch(gsm_export_combined_report(ok_results, file, format = format,
-                                        manifest = manifest),
+                                        manifest = manifest, run_info = run_info),
              error = function(e) gsm_batch_log(st,
                sprintf("Combined report failed: %s", conditionMessage(e))))
   }

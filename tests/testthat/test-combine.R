@@ -35,11 +35,11 @@ test_that("gsm_combined_metrics returns one row per dataset plus a meta row", {
   res <- make_combined_results()
   tb <- gsm_combined_metrics(res)
   expect_s3_class(tb, "data.frame")
-  expect_equal(nrow(tb), 3)                       # dsA, dsB, ALL (mean)
-  expect_equal(tb$Dataset[3], "ALL (mean)")
+  expect_equal(nrow(tb), 3)                       # dsA, dsB, ALL
+  expect_equal(tb$Dataset[3], "ALL")
   expect_true(all(c("Mean_Accuracy", "SD_Accuracy", "Mean_F_measure") %in% names(tb)))
-  # meta mean equals the average of the two dataset means
-  expect_equal(tb$Mean_Accuracy[3], mean(tb$Mean_Accuracy[1:2]), tolerance = 1e-8)
+  # meta mean equals the average of the two dataset means (values rounded to 4 dp)
+  expect_equal(tb$Mean_Accuracy[3], mean(tb$Mean_Accuracy[1:2]), tolerance = 1e-3)
 })
 
 test_that("consensus group ranking aggregates across datasets via RRA", {
