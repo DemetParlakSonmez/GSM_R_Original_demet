@@ -23,23 +23,32 @@ gsm_combined_metrics <- function(results) {
 
   rows <- lapply(results, function(r) {
     mm <- r$metrics_summary
-    row <- data.frame(Dataset = r$name, N_folds_ok = r$n_ok %||% NA_integer_,
-                      stringsAsFactors = FALSE)
+    row <- data.frame(
+      Dataset      = r$name,
+      Samples      = r$n_samples %||% NA_integer_,
+      Genes        = r$n_genes   %||% NA_integer_,
+      Groups       = r$n_groups  %||% NA_integer_,
+      N_folds_ok   = r$n_ok      %||% NA_integer_,
+      Mean_Best_k  = round(r$best_k_mean %||% NA_real_, 2),
+      Elapsed_sec  = round(r$elapsed     %||% NA_real_, 1),
+      stringsAsFactors = FALSE)
     for (m in metric_names) {
-      row[[paste0("Mean_", m)]] <- tryCatch(mm[m, "Mean"], error = function(e) NA_real_)
-      row[[paste0("SD_", m)]]   <- tryCatch(mm[m, "SD"],   error = function(e) NA_real_)
+      row[[paste0("Mean_", m)]] <- round(tryCatch(mm[m, "Mean"], error = function(e) NA_real_), 4)
+      row[[paste0("SD_", m)]]   <- round(tryCatch(mm[m, "SD"],   error = function(e) NA_real_), 4)
     }
     row
   })
   df <- do.call(rbind, rows)
   rownames(df) <- NULL
 
-  # Meta row: mean across datasets of each Mean_/SD_ column.
+  # Meta row: sum the counts/time, average the rates.
   meta <- df[1, , drop = FALSE]
-  meta$Dataset <- "ALL (mean)"
-  meta$N_folds_ok <- sum(df$N_folds_ok, na.rm = TRUE)
-  for (cn in grep("^(Mean|SD)_", names(df), value = TRUE))
-    meta[[cn]] <- mean(df[[cn]], na.rm = TRUE)
+  meta$Dataset <- "ALL"
+  for (cn in c("N_folds_ok", "Elapsed_sec"))
+    meta[[cn]] <- sum(df[[cn]], na.rm = TRUE)
+  for (cn in c("Samples", "Genes", "Groups", "Mean_Best_k",
+               grep("^(Mean|SD)_", names(df), value = TRUE)))
+    meta[[cn]] <- round(mean(df[[cn]], na.rm = TRUE), 4)
   rbind(df, meta)
 }
 
@@ -107,12 +116,15 @@ gsm_combined_biomarkers <- function(results) {
 #' @param file Output path (`.xlsx` or `.zip`).
 #' @param format `"xlsx"` or `"csv"`.
 #' @param manifest Optional manifest data.frame to include as a sheet.
+#' @param run_info Optional key/value data.frame of run parameters + timing
+#'   (from `gsm_batch_run_info()`), included as the first sheet.
 #' @return `file`, invisibly.
 #' @export
 gsm_export_combined_report <- function(results, file, format = c("xlsx", "csv"),
-                                       manifest = NULL) {
+                                       manifest = NULL, run_info = NULL) {
   format <- match.arg(format)
   tables <- list(
+    RunInfo            = run_info,
     PerDatasetMetrics  = gsm_combined_metrics(results),
     GroupConsensus     = gsm_combined_group_consensus(results),
     BiomarkerConsensus = gsm_combined_biomarkers(results)

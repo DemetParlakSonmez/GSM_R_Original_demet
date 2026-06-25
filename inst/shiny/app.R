@@ -101,6 +101,15 @@ help_tip <- function(text) {
   )
 }
 
+# A field label with an inline info (?) icon; hover/focus the icon for `tip`.
+# Use above an input given `label = NULL` to attach contextual help.
+field_label <- function(text, tip) {
+  tags$div(style = "display:flex; align-items:center; gap:4px; margin-bottom:4px;",
+    tags$label(text, style = "margin:0;"),
+    help_tip(tip)
+  )
+}
+
 # Numbered workflow tab title: "(n) <icon> <label>".
 nav_step_title <- function(n, icon, label) {
   tags$span(
@@ -1029,42 +1038,64 @@ ui <- page_navbar(
         fileInput("batch_groups_upload", "…or upload grouping file",
                   accept = c(".csv", ".tsv", ".gmt", ".txt")),
         tags$hr(),
-        selectInput("bp_score_method", "Classifier",
+        field_label("Classifier", "Machine-learning algorithm used to score each group and build models. Random Forest is robust and gives gene importances; SVM suits small samples; KNN is simple; XGBoost handles complex patterns. Applied to every dataset."),
+        selectInput("bp_score_method", NULL,
                     choices = c("Random Forest" = "rf",
                                 "Support Vector Machine" = "svm",
                                 "K-Nearest Neighbors" = "knn",
                                 "XGBoost" = "xgb")),
-        selectInput("bp_prescore_method", "Pre-scoring",
+        field_label("Pre-scoring", "Fast statistical test that ranks groups so only the strongest go to ML scoring. Computed on the TRAINING split of each fold (no leakage). ANOVA/limma combine per-gene p-values; Fisher (chi-square) calibrates for group size; Empirical Brown also corrects gene-gene correlation; CAMERA is a competitive 2-class test; GSVA scores single-sample enrichment; None keeps all groups."),
+        selectInput("bp_prescore_method", NULL,
                     choices = c("ANOVA" = "anova", "limma (moderated)" = "limma",
                                 "Fisher (chi-square)" = "fisher_chisq",
                                 "Empirical Brown" = "ebm",
                                 "CAMERA (2-class)" = "camera",
                                 "GSVA / ssGSEA" = "gsva", "None" = "none")),
         layout_columns(col_widths = c(6, 6),
-          numericInput("bp_mccv_iterations", "MCCV iters", value = 10, min = 1, max = 500),
-          numericInput("bp_top_percent", "Pre-score top %", value = 100, min = 1, max = 100)),
+          tags$div(
+            field_label("MCCV iters", "Number of Monte-Carlo cross-validation folds per dataset. Each fold makes a fresh random train/test split and runs the full score->rank->model pipeline; results are averaged. More folds = more stable estimates but longer runtime."),
+            numericInput("bp_mccv_iterations", NULL, value = 10, min = 1, max = 500)),
+          tags$div(
+            field_label("Pre-score top %", "Applied on the TRAINING part only, independently in each MCCV round (fold): groups are ranked by the pre-scoring test on that fold's training split, and only this top fraction is kept before the expensive ML scoring (the held-out test samples are never used). E.g. 20% of 327 groups keeps ~66. Lower = faster, more aggressive filtering; 100% keeps all groups."),
+            numericInput("bp_top_percent", NULL, value = 100, min = 1, max = 100))),
         layout_columns(col_widths = c(6, 6),
-          numericInput("bp_train_ratio", "Train ratio", value = 0.7, min = 0.5, max = 0.95, step = 0.05),
-          numericInput("bp_n_top_groups", "Top-N groups", value = 10, min = 1)),
-        selectInput("bp_model_method", "Final modeling",
+          tags$div(
+            field_label("Train ratio", "Fraction of samples used for training in each fold's random split (e.g. 0.7 = 70% train, 30% held-out test). Pre-scoring, gene shaving, scoring and modeling all use the training part only."),
+            numericInput("bp_train_ratio", NULL, value = 0.7, min = 0.5, max = 0.95, step = 0.05)),
+          tags$div(
+            field_label("Top-N groups", "Accumulative modeling builds classifiers from the top-1, top-2, ... up to top-N ranked groups, reporting performance at each level. The best k (by F1) is chosen per fold."),
+            numericInput("bp_n_top_groups", NULL, value = 10, min = 1))),
+        field_label("Final modeling", "Classifier used to build the final accumulative model from the top-ranked groups. 'Same as scoring' reuses the classifier above; otherwise pick a different algorithm for the modeling step."),
+        selectInput("bp_model_method", NULL,
                     choices = c("Same as scoring" = "same", "Random Forest" = "rf",
                                 "SVM" = "svm", "KNN" = "knn", "XGBoost" = "xgb")),
         layout_columns(col_widths = c(6, 6),
-          checkboxInput("bp_shave", "Gene shaving", value = TRUE),
-          checkboxInput("bp_normalize", "Z-normalize", value = FALSE)),
-        checkboxInput("bp_discover", "Module discovery (per dataset)", value = FALSE),
+          tags$div(style = "display:flex; align-items:center; gap:4px;",
+            checkboxInput("bp_shave", "Gene shaving", value = TRUE),
+            help_tip("Before scoring, drop genes that are not individually differential (Welch t-test + BH FDR on the TRAINING split). Focuses each group on its informative genes.")),
+          tags$div(style = "display:flex; align-items:center; gap:4px;",
+            checkboxInput("bp_normalize", "Z-normalize", value = FALSE),
+            help_tip("Standardize each gene to mean 0 / SD 1 (fit on training, applied to test). Helps distance-based classifiers (KNN, SVM); usually unnecessary for tree models."))),
         tags$div(style = "display:flex; align-items:center; gap:4px;",
-          tags$label("Speed / memory"),
-          help_tip("CPU cores = total workers shared across ALL datasets' folds. Max resident = how many datasets are held in memory at once (bounds RAM; folds still saturate all cores).")
-        ),
+          checkboxInput("bp_discover", "Module discovery (per dataset)", value = FALSE),
+          help_tip("After MCCV, run de-novo module discovery (RRA-ranked robust genes -> co-selection network -> Louvain clustering with bootstrap validation) for each dataset. Adds time but yields data-driven gene modules.")),
+        field_label("Speed / memory", "CPU cores = total workers shared across ALL datasets' folds (every (dataset, fold) unit runs over one pool). Max resident = how many datasets are held in memory at once (bounds RAM; folds still saturate all cores)."),
         layout_columns(col_widths = c(7, 5),
-          sliderInput("bp_cores", "CPU cores", min = 1, max = parallel::detectCores(),
-                      value = max(1, parallel::detectCores() - 1), step = 1),
-          numericInput("bp_max_resident", "Max resident", value = 2, min = 1, max = 20)),
+          tags$div(
+            field_label("CPU cores", "Total parallel workers shared across all datasets and folds. Higher = faster, up to the machine's core count."),
+            sliderInput("bp_cores", NULL, min = 1, max = parallel::detectCores(),
+                      value = max(1, parallel::detectCores() - 1), step = 1)),
+          tags$div(
+            field_label("Max resident", "How many datasets are loaded in memory at the same time. Lower bounds peak RAM (datasets load/release just-in-time); cores stay busy as long as a couple datasets supply enough folds."),
+            numericInput("bp_max_resident", NULL, value = 2, min = 1, max = 20))),
         layout_columns(col_widths = c(6, 6),
-          numericInput("bp_seed", "Seed", value = 44, min = 1),
-          selectInput("bp_report_format", "Report",
-                      choices = c("Excel (.xlsx)" = "xlsx", "CSV (.zip)" = "csv"))),
+          tags$div(
+            field_label("Seed", "Random seed for reproducibility. Fold f uses seed+f, so the same seed reproduces identical splits and results."),
+            numericInput("bp_seed", NULL, value = 44, min = 1)),
+          tags$div(
+            field_label("Report", "Format of the combined cross-dataset report: a multi-sheet Excel workbook (.xlsx) or a zip of CSV files."),
+            selectInput("bp_report_format", NULL,
+                      choices = c("Excel (.xlsx)" = "xlsx", "CSV (.zip)" = "csv")))),
         tags$hr(),
         actionButton("btn_batch", "\U0001F680 Run Batch",
                      class = "btn-primary btn-lg w-100")
@@ -1085,6 +1116,9 @@ ui <- page_navbar(
             downloadButton("dl_batch_all", "\U0001F4E6 All results (zip)",
                            class = "btn-outline-light w-100"),
             tags$div(class = "text-muted small", textOutput("batch_outdir_note"))),
+          tags$hr(),
+          tags$strong("Run details (parameters + timing)"),
+          DTOutput("batch_run_info"),
           tags$hr(),
           tags$strong("Per-dataset performance"),
           DTOutput("batch_combined_metrics")
@@ -3531,6 +3565,14 @@ server <- function(input, output, session) {
     if (is.null(bt$outdir)) "" else
       paste0("Per-dataset .rds + tables + logs under: ",
              file.path(bt$outdir, "per_dataset"))
+  })
+
+  output$batch_run_info <- renderDT({
+    req(bt$done, bt$st)
+    info <- tryCatch(gsmR:::gsm_batch_run_info(bt$st), error = function(e) NULL)
+    req(info)
+    DT::datatable(info, rownames = FALSE,
+                  options = list(scrollX = TRUE, dom = "t", pageLength = 100))
   })
 
   output$batch_combined_metrics <- renderDT({
