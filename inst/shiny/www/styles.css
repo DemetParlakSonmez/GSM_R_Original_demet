@@ -1,5 +1,18 @@
 /* gsmR Shiny App — Custom Styles */
 
+/* ── Design tokens ──────────────────────────────────────────────────────── */
+:root {
+  --bg:        #0e1222;
+  --panel:     #171c30;   /* cards / sidebar surface */
+  --panel-2:   #1e2438;   /* raised surface (inputs, headers) */
+  --accent:    #4a90d9;
+  --accent-2:  #62a8f0;
+  --text:      #e8ecf6;
+  --muted:     #9aa3bf;
+  --border:    rgba(255,255,255,0.10);
+  --border-strong: rgba(255,255,255,0.18);
+}
+
 /* ── Value boxes ────────────────────────────────────────────────────────── */
 .value-box {
   border-radius: 12px;
@@ -110,3 +123,114 @@
   background: rgba(255,255,255,0.05);
   color: #666;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Professional polish — contrast, sidebar discoverability, navigation
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Body / overall contrast lift */
+body, .bslib-page-navbar { background-color: var(--bg) !important; color: var(--text); }
+.bslib-sidebar-layout > .main, .tab-content { background-color: var(--bg); }
+
+/* Cards: slightly lifted, clearer header */
+.card, .bslib-card {
+  background-color: var(--panel) !important;
+}
+.card > .card-header, .bslib-card .card-header {
+  background: var(--panel-2) !important;
+  border-bottom: 1px solid var(--border) !important;
+  font-weight: 600; letter-spacing: 0.2px; color: var(--text);
+}
+
+/* Inputs: legible surfaces on dark */
+.form-control, .form-select, .selectize-input,
+.shiny-input-container input[type="number"], textarea.form-control {
+  background-color: var(--panel-2) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text) !important;
+}
+.form-control:focus, .form-select:focus, .selectize-input.focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px rgba(74,144,217,0.25) !important;
+}
+.shiny-input-container > label, .control-label, label.form-label {
+  color: var(--text); font-weight: 600; font-size: 0.86rem;
+}
+
+/* ── Sidebar: a distinct "Settings" panel ───────────────────────────────── */
+.bslib-sidebar-layout > .sidebar {
+  background: var(--panel) !important;
+  border-right: 1px solid var(--border-strong);
+}
+.bslib-sidebar-layout > .sidebar > .sidebar-content { padding-top: 6px; }
+/* The sidebar(title=) becomes a clear panel header */
+.bslib-sidebar-layout > .sidebar .sidebar-title {
+  font-size: 1rem; font-weight: 700; color: var(--text);
+  letter-spacing: 0.3px; padding-bottom: 8px; margin-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 6px;
+}
+
+/* ── Sidebar collapse toggle: big, obvious, labeled ─────────────────────── */
+.bslib-sidebar-layout > .collapse-toggle {
+  width: 34px; height: 34px;
+  top: 10px;
+  display: flex !important; align-items: center; justify-content: center;
+  background: rgba(74,144,217,0.22) !important;
+  border: 1px solid var(--accent) !important;
+  border-radius: 9px !important;
+  color: #fff !important; opacity: 1 !important;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.45);
+  transition: background .15s ease, transform .15s ease, box-shadow .15s ease;
+  z-index: 30;
+}
+.bslib-sidebar-layout > .collapse-toggle:hover {
+  background: var(--accent) !important;
+  transform: scale(1.06);
+  box-shadow: 0 4px 14px rgba(74,144,217,0.5);
+}
+.bslib-sidebar-layout > .collapse-toggle:focus-visible {
+  outline: 3px solid rgba(74,144,217,0.5); outline-offset: 2px;
+}
+.bslib-sidebar-layout > .collapse-toggle .collapse-icon {
+  width: 1.1rem; height: 1.1rem; stroke-width: 2.5;
+}
+/* "Settings" hint label injected beside the toggle (see app.R script) */
+.gsm-sidebar-hint {
+  position: absolute; top: 14px; left: 52px; z-index: 29;
+  font-size: 0.78rem; font-weight: 600; color: var(--muted);
+  pointer-events: none; white-space: nowrap;
+  transition: opacity .2s ease;
+}
+/* Hide the hint once the panel is open (toggle sits over the panel) */
+.bslib-sidebar-layout:not(.sidebar-collapsed) .gsm-sidebar-hint { opacity: 0; }
+
+/* ── Navigation: clearer states + accessible focus ──────────────────────── */
+.navbar-nav .nav-link:focus-visible {
+  outline: 2px solid var(--accent-2); outline-offset: 2px;
+}
+.navbar-nav .nav-link.active { font-weight: 600; }
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+.btn-primary { border: none; }
+.btn:focus-visible { outline: 3px solid rgba(74,144,217,0.5); outline-offset: 2px; }
+
+/* ── Empty-state placeholder for blank result panels ────────────────────── */
+.gsm-empty {
+  text-align: center; padding: 48px 20px; color: var(--muted);
+}
+.gsm-empty .gsm-empty-icon { font-size: 2.2rem; opacity: 0.5; display: block; margin-bottom: 8px; }
+.gsm-empty .gsm-empty-text { font-size: 0.95rem; }
+
+/* ── Dark, slim scrollbars ──────────────────────────────────────────────── */
+* { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.22) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.18); border-radius: 8px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.32); background-clip: content-box; }
+
+/* Tables (DT) on dark */
+.dataTables_wrapper { color: var(--text); }
+table.dataTable tbody td { color: var(--text); }

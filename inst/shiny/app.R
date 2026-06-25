@@ -133,8 +133,14 @@ ui <- page_navbar(
     version = 5,
     bootswatch = "darkly",
     primary = "#4a90d9",
+    secondary = "#5b6480",
+    success = "#0f9b58",
+    info = "#4a90d9",
+    warning = "#f4a623",
     "font-size-base" = "0.92rem",
-    "border-radius" = "0.75rem"
+    "border-radius" = "0.75rem",
+    "font-family-sans-serif" =
+      "system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
   ),
   header = tags$head(
     tags$link(rel = "stylesheet", href = "styles.css"),
@@ -296,6 +302,28 @@ ui <- page_navbar(
             '</div>';
         }
       });
+
+      /* Make the bslib sidebar collapse toggle discoverable: give it an
+         accessible label/tooltip and a 'Settings' hint shown when collapsed. */
+      function gsmLabelToggles() {
+        document.querySelectorAll('.bslib-sidebar-layout > .collapse-toggle').forEach(function(btn) {
+          if (btn.dataset.gsmLabeled) return;
+          btn.dataset.gsmLabeled = '1';
+          btn.setAttribute('title', 'Show / hide the settings panel');
+          btn.setAttribute('aria-label', 'Show or hide the settings panel');
+          var layout = btn.parentElement;
+          if (layout && !layout.querySelector('.gsm-sidebar-hint')) {
+            var hint = document.createElement('span');
+            hint.className = 'gsm-sidebar-hint';
+            hint.textContent = 'Settings';
+            layout.appendChild(hint);
+          }
+        });
+      }
+      document.addEventListener('DOMContentLoaded', gsmLabelToggles);
+      setTimeout(gsmLabelToggles, 400);
+      setTimeout(gsmLabelToggles, 1200);
+      new MutationObserver(gsmLabelToggles).observe(document.body, { childList: true, subtree: true });
     "))
   ),
 
@@ -305,7 +333,7 @@ ui <- page_navbar(
     title = nav_step_title("1", "\U0001F4C2", "Data"),
     layout_sidebar(
       sidebar = sidebar(
-        title = "Upload Files",
+        title = "\U2699\UFE0F Data — Setup",
         width = 340,
         # -- Expression file --
         tags$div(
@@ -403,7 +431,7 @@ ui <- page_navbar(
     title = nav_step_title("2", "\U0001F501", "Replicates"),
     layout_sidebar(
       sidebar = sidebar(
-        title = "Collapsing Settings",
+        title = "\U2699\UFE0F Replicates — Settings",
         width = 340,
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           tags$label("\U0001F4CB Metadata (CSV)"),
@@ -473,7 +501,7 @@ ui <- page_navbar(
     title = nav_step_title("3", "\U0001F4CA", "Pre-Score"),
     layout_sidebar(
       sidebar = sidebar(
-        title = "Pre-Scoring Settings",
+        title = "\U2699\UFE0F Pre-Score — Settings",
         width = 340,
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           tags$label("Method"),
@@ -608,7 +636,7 @@ ui <- page_navbar(
     title = nav_step_title("4", "\U0001F3AF", "Score"),
     layout_sidebar(
       sidebar = sidebar(
-        title = "Scoring Settings",
+        title = "\U2699\UFE0F Score — Settings",
         width = 340,
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           tags$label("Classifier"),
@@ -1016,7 +1044,7 @@ ui <- page_navbar(
     title = nav_step_title("6", "\U0001F9EE", "Batch"),
     layout_sidebar(
       sidebar = sidebar(
-        title = "Batch Setup", width = 360,
+        title = "\U2699\UFE0F Batch — Setup", width = 360,
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           tags$label("\U0001F9EC Datasets"),
           help_tip("Pick built-in examples and/or upload your own expression files. Uploads and selected examples are combined. Each dataset runs against the single grouping file below, sharing the parameters here; all (dataset x fold) work units run over one shared core pool.")
@@ -3518,8 +3546,7 @@ server <- function(input, output, session) {
 
   output$batch_overall <- renderUI({
     sn <- bt$snap
-    if (is.null(sn)) return(tags$div(class = "text-muted",
-      "Select datasets + a grouping file, set parameters, then click Run Batch."))
+    if (is.null(sn)) return(NULL)
     done_folds <- sum(sn$done_count)
     pct <- if (bt$total > 0) round(100 * done_folds / bt$total) else 0
     n_done <- sum(sn$status == "done"); n_tot <- length(sn$status)
@@ -3537,7 +3564,12 @@ server <- function(input, output, session) {
 
   output$batch_status <- renderUI({
     sn <- bt$snap
-    if (is.null(sn)) return(tags$div(class = "text-muted", "No batch running."))
+    if (is.null(sn)) return(tags$div(class = "gsm-empty",
+      tags$span(class = "gsm-empty-icon", "\U0001F4CA"),
+      tags$div(class = "gsm-empty-text",
+               "No batch running yet. Pick datasets + a grouping file in the ",
+               tags$strong("Settings"), " panel, then click ",
+               tags$strong("\U0001F680 Run Batch"), ".")))
     rows <- lapply(names(sn$status), function(nm) {
       stt <- sn$status[[nm]]; dc <- sn$done_count[[nm]]
       badge <- switch(stt, done = "success", running = "info",
