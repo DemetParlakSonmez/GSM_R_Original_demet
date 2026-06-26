@@ -110,6 +110,26 @@ field_label <- function(text, tip) {
   )
 }
 
+# Turn a raw batch failure message into a plain-language "what to do" suggestion.
+batch_fail_hint <- function(msg) {
+  m <- tolower(paste(msg, collapse = " "))
+  if (grepl("no groups remain|gene id matching|genes in groups|after filtering", m))
+    return(paste0("The grouping file's genes don't match these datasets. ",
+                  "In “Grouping file” pick a real file (e.g. KEGG, mate, or ",
+                  "DisGeNET) instead of the bundled toy, then re-run."))
+  if (grepl("all folds failed|all mccv folds failed", m))
+    return(paste0("Every cross-validation fold failed — usually too few samples ",
+                  "per class or a single-class split. Check the dataset has ≥2 ",
+                  "classes with enough samples, or lower MCCV iterations / train ratio."))
+  if (grepl("2 distinct classes|distinct classes|class column|nlevels", m))
+    return(paste0("The expression file needs a ‘class’ column with at least two ",
+                  "classes. Verify the first column holds the labels."))
+  if (grepl("not found|cannot open|no such file|cannot read", m))
+    return("A file couldn't be read — re-select or re-upload the dataset / grouping file.")
+  paste0("See the Batch log for details. Expected formats: expression = samples as rows ",
+         "with a first ‘class’ column; grouping = two columns (gene, group) or GMT.")
+}
+
 # Numbered workflow tab title: "(n) <icon> <label>".
 nav_step_title <- function(n, icon, label) {
   tags$span(
@@ -1130,6 +1150,7 @@ ui <- page_navbar(
       ),
       # Main panel
       uiOutput("batch_overall"),
+      uiOutput("batch_alert"),
       card(
         card_header("\U0001F4CA Per-dataset progress"),
         uiOutput("batch_status")
@@ -3562,6 +3583,33 @@ server <- function(input, output, session) {
     )
   })
 
+  output$batch_alert <- renderUI({
+    sn <- bt$snap
+    if (is.null(sn)) return(NULL)
+    errs <- sn$errors
+    n_err <- length(errs)
+    if (n_err == 0) return(NULL)
+    n_tot <- length(sn$status)
+    all_failed <- n_err >= n_tot
+    # Dominant failure reason → one shared suggestion.
+    tab <- sort(table(unlist(unname(errs))), decreasing = TRUE)
+    hint <- batch_fail_hint(names(tab)[1])
+    cls <- if (all_failed) "alert-danger" else "alert-warning"
+    icon <- if (all_failed) "\U274C" else "\U26A0\UFE0F"
+    tags$div(class = paste("alert", cls), role = "alert",
+      style = "border-radius:12px; margin-bottom:14px;",
+      tags$div(style = "font-weight:700; font-size:1.02rem; margin-bottom:4px;",
+        sprintf("%s %d of %d dataset%s failed", icon, n_err, n_tot,
+                if (n_tot == 1) "" else "s")),
+      tags$div(style = "margin-bottom:6px;", tags$strong("Likely fix: "), hint),
+      tags$details(
+        tags$summary(class = "small", style = "cursor:pointer;",
+                     "Show per-dataset error messages"),
+        tags$ul(class = "small mb-0", style = "margin-top:6px;",
+          lapply(names(errs), function(nm)
+            tags$li(tags$strong(nm), ": ", errs[[nm]])))))
+  })
+
   output$batch_status <- renderUI({
     sn <- bt$snap
     if (is.null(sn)) return(tags$div(class = "gsm-empty",
@@ -3570,19 +3618,26 @@ server <- function(input, output, session) {
                "No batch running yet. Pick datasets + a grouping file in the ",
                tags$strong("Settings"), " panel, then click ",
                tags$strong("\U0001F680 Run Batch"), ".")))
+    errs <- sn$errors
     rows <- lapply(names(sn$status), function(nm) {
       stt <- sn$status[[nm]]; dc <- sn$done_count[[nm]]
       badge <- switch(stt, done = "success", running = "info",
                       error = "danger", loading = "warning", "secondary")
       frac <- if (sn$n_iter > 0) round(100 * dc / sn$n_iter) else 0
-      tags$div(class = "d-flex align-items-center gap-2 mb-2",
-        tags$span(class = sprintf("badge bg-%s", badge),
-                  style = "min-width:64px;", stt),
-        tags$strong(style = "min-width:160px;", nm),
-        tags$div(class = "progress flex-grow-1", style = "height:16px;",
-          tags$div(class = "progress-bar", role = "progressbar",
-                   style = sprintf("width:%d%%;", frac))),
-        tags$span(class = "text-muted small", sprintf("%d/%d", dc, sn$n_iter)))
+      err_msg <- if (!is.null(errs) && nm %in% names(errs)) errs[[nm]] else NULL
+      tags$div(
+        tags$div(class = "d-flex align-items-center gap-2 mb-1",
+          tags$span(class = sprintf("badge bg-%s", badge),
+                    style = "min-width:64px;", stt),
+          tags$strong(style = "min-width:160px;", nm),
+          tags$div(class = "progress flex-grow-1", style = "height:16px;",
+            tags$div(class = "progress-bar", role = "progressbar",
+                     style = sprintf("width:%d%%;", frac))),
+          tags$span(class = "text-muted small", sprintf("%d/%d", dc, sn$n_iter))),
+        if (!is.null(err_msg))
+          tags$div(class = "small text-danger mb-2",
+                   style = "margin-left:72px;",
+                   tags$span(style = "opacity:0.85;", "\U26A0\UFE0F ", err_msg)))
     })
     do.call(tags$div, rows)
   })
