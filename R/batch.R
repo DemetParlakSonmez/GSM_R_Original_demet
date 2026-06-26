@@ -95,6 +95,7 @@ gsm_batch_new_state <- function(expression_files, groups_file, params = list(),
   st$running_meta <- list() # key -> list(name=, fold=)
   st$results    <- list()   # name -> finalized per-dataset result
   st$manifest   <- list()
+  st$errors     <- character(0)  # name -> failure message (for UI)
   st$log        <- character(0)
   st$logfile    <- file.path(outdir, "batch.log")
   st$active     <- TRUE
@@ -145,6 +146,7 @@ gsm_batch_snapshot <- function(st) {
     window     = st$window,
     active     = st$active,
     all_done   = st$all_done,
+    errors     = st$errors,
     log_tail   = utils::tail(st$log, 25L)
   )
 }
@@ -176,6 +178,7 @@ gsm_batch_snapshot <- function(st) {
       TRUE
     }, error = function(e) {
       st$status[nm] <- "error"
+      st$errors[nm] <- conditionMessage(e)
       st$manifest[[length(st$manifest) + 1L]] <-
         .gsm_manifest_row(nm, "error", error = conditionMessage(e))
       gsm_batch_log(st, sprintf("ERROR loading '%s': %s", nm, conditionMessage(e)))
@@ -277,11 +280,18 @@ gsm_batch_snapshot <- function(st) {
   agg <- tryCatch(aggregate_mccv_folds(folds), error = function(e) NULL)
 
   if (is.null(agg)) {
+    # Surface a representative fold error so the UI can explain the failure.
+    ferr <- NULL
+    for (fr in folds) if (is.list(fr) && !is.null(fr$error_message)) {
+      ferr <- fr$error_message; break
+    }
+    msg <- if (!is.null(ferr)) ferr else "all folds failed"
     st$status[nm] <- "error"
+    st$errors[nm] <- msg
     st$manifest[[length(st$manifest) + 1L]] <- .gsm_manifest_row(
       nm, "error", samples = ds$params$n_samples, genes = ds$params$n_genes,
-      groups = ds$params$n_groups, elapsed = elapsed, error = "all folds failed")
-    gsm_batch_log(st, sprintf("Dataset '%s' FAILED (all folds errored)", nm))
+      groups = ds$params$n_groups, elapsed = elapsed, error = msg)
+    gsm_batch_log(st, sprintf("Dataset '%s' FAILED: %s", nm, msg))
   } else {
     n_ok <- sum(vapply(folds, function(r) is.list(r) && identical(r$status, "success"),
                        logical(1)))
