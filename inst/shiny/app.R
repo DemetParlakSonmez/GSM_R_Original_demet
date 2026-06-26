@@ -42,6 +42,15 @@ if (requireNamespace("gsmR", quietly = TRUE)) {
 .groups_choices <- c("Bundled toy (test_groups.csv)" = "__toy__",
                      stats::setNames(.example_groups, .example_groups))
 
+# Default grouping file for the dropdowns: prefer the DisGeNET cancer set
+# (real gene symbols that match the GDS example datasets), else first example.
+.default_groups <- {
+  hit <- grep("disgenet", .example_groups, ignore.case = TRUE, value = TRUE)
+  if (length(hit)) hit[1]
+  else if (length(.example_groups)) .example_groups[1]
+  else "__toy__"
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Helper: value box HTML
 # ══════════════════════════════════════════════════════════════════════════════
@@ -401,7 +410,7 @@ ui <- page_navbar(
         selectInput("example_expr", "Example expression dataset",
                     choices = .expr_choices),
         selectInput("example_groups", "Example grouping file",
-                    choices = .groups_choices),
+                    choices = .groups_choices, selected = .default_groups),
         actionButton("btn_example", "\U0001F4E6 Load Selected Example",
                      class = "btn-outline-light btn-sm w-100"),
         tags$small(class = "text-muted d-block mt-1 text-center",
@@ -1082,7 +1091,8 @@ ui <- page_navbar(
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           tags$label("\U0001F5C2️ Grouping file"),
           help_tip("One grouping file shared by every dataset. Pick an example, or upload your own (2-column gene,group CSV or GMT). An upload overrides the dropdown.")),
-        selectInput("batch_groups", "Built-in example", choices = .groups_choices),
+        selectInput("batch_groups", "Built-in example", choices = .groups_choices,
+                    selected = .default_groups),
         fileInput("batch_groups_upload", "…or upload grouping file",
                   accept = c(".csv", ".tsv", ".gmt", ".txt")),
         tags$hr(),
