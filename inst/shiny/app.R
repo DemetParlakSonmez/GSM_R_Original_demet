@@ -375,24 +375,92 @@ ui <- page_navbar(
           uiOutput("expr_file_status")
         ),
         tags$hr(),
-        # -- Grouping file + options --
-        tags$div(
-          class = "upload-area",
-          tags$div(style = "display:flex; align-items:center; gap:4px; ",
-            tags$label("\U0001F5C2\uFE0F Grouping File"),
-            help_tip("2-column CSV (gene, group) or GMT format. Maps genes to functional groups (pathways, GO terms, etc.).")
-          ),
-          fileInput("groups_file", NULL, accept = c(".csv", ".tsv", ".gmt", ".txt")),
-          uiOutput("groups_file_status")
-        ),
+        # -- Grouping method selector (extensible: more methods can be added) --
         tags$div(style = "display:flex; align-items:center; gap:4px;",
-          tags$label("Format", style = "margin:0;"),
-          help_tip("Auto-detect picks CSV or GMT based on file extension. Override if the wrong format is detected.")
+          tags$label("\U0001F9E9 Grouping Method", style = "margin:0;"),
+          help_tip("How groups of genes are formed. 'From file' uses a predefined grouping (pathways, disease sets, GO). 'BRIDGE' derives groups data-drivenly from expression + class labels, regularized by a prior biological graph.")
         ),
-        selectInput("groups_format", NULL,
-                    choices = c("Auto-detect" = "auto",
-                                "2-column CSV" = "csv",
-                                "GMT" = "gmt")),
+        selectInput("grouping_method", NULL,
+                    choices = c("From file (CSV/GMT)" = "file",
+                                "BRIDGE (data-driven + prior)" = "bridge")),
+
+        # \u2500\u2500 BRIDGE intro + prior source (shown only for BRIDGE) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        conditionalPanel(
+          condition = "input.grouping_method == 'bridge'",
+          tags$div(class = "text-muted",
+                   style = "font-size:0.8rem; margin-bottom:6px;",
+                   "BRIDGE builds groups from your expression matrix and class labels, penalized toward a prior biological graph. No predefined grouping is required."),
+          tags$div(style = "display:flex; align-items:center; gap:4px;",
+            tags$label("Prior graph source", style = "margin:0;"),
+            help_tip("The prior biological graph B nudges related genes together. 'Grouping file' reuses a pathway/disease file (genes sharing a group get a prior edge). 'Edge list' uploads a (gene_i, gene_j, weight) CSV. 'None' runs purely data-driven (B = 0).")
+          ),
+          selectInput("bridge_prior_source", NULL,
+                      choices = c("Grouping file (reuse below)" = "groups",
+                                  "Edge list / matrix upload" = "file",
+                                  "None (data-driven)" = "none"))
+        ),
+
+        # \u2500\u2500 Shared grouping-file input (single input id, no duplication) \u2500\u2500
+        # Shown for the file method, and for BRIDGE when its prior is a grouping file.
+        conditionalPanel(
+          condition = "input.grouping_method == 'file' || (input.grouping_method == 'bridge' && input.bridge_prior_source == 'groups')",
+          tags$div(
+            class = "upload-area",
+            tags$div(style = "display:flex; align-items:center; gap:4px; ",
+              tags$label("\U0001F5C2\uFE0F Grouping File"),
+              help_tip("2-column CSV (gene, group) or GMT format. Maps genes to functional groups (pathways, GO terms, etc.). For BRIDGE this file builds the prior graph B.")
+            ),
+            fileInput("groups_file", NULL, accept = c(".csv", ".tsv", ".gmt", ".txt")),
+            uiOutput("groups_file_status")
+          ),
+          tags$div(style = "display:flex; align-items:center; gap:4px;",
+            tags$label("Format", style = "margin:0;"),
+            help_tip("Auto-detect picks CSV or GMT based on file extension. Override if the wrong format is detected.")
+          ),
+          selectInput("groups_format", NULL,
+                      choices = c("Auto-detect" = "auto",
+                                  "2-column CSV" = "csv",
+                                  "GMT" = "gmt"))
+        ),
+
+        # \u2500\u2500 BRIDGE-specific inputs \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        conditionalPanel(
+          condition = "input.grouping_method == 'bridge'",
+          conditionalPanel(
+            condition = "input.bridge_prior_source == 'file'",
+            tags$div(class = "upload-area",
+              tags$div(style = "display:flex; align-items:center; gap:4px; ",
+                tags$label("\U0001F517 Prior edge list"),
+                help_tip("CSV with columns: gene_i, gene_j, weight (weight in [0,1]). Symmetric relatedness between genes.")
+              ),
+              fileInput("bridge_prior_file", NULL, accept = c(".csv", ".tsv", ".txt"))
+            )
+          ),
+          tags$div(style = "display:flex; align-items:center; gap:4px; margin-top:4px;",
+            tags$label("Data type", style = "margin:0;"),
+            help_tip("'Gaussian' assumes roughly normal data. 'Nonparanormal' applies a rank-based transform first (huge.npn) for skewed data. 'Compositional' (microbiome) is not yet available.")
+          ),
+          selectInput("bridge_data_type", NULL,
+                      choices = c("Gaussian" = "gaussian",
+                                  "Nonparanormal" = "nonparanormal",
+                                  "Compositional (coming soon)" = "compositional")),
+          tags$details(
+            tags$summary(class = "text-muted", style = "cursor:pointer; font-size:0.85rem;",
+                         "\u2699\uFE0F Advanced hyperparameters"),
+            tags$div(style = "margin-top:6px;",
+              layout_columns(col_widths = c(6, 6),
+                numericInput("bridge_lambda", "lambda (sparsity)", value = 0.1, min = 0, step = 0.01),
+                numericInput("bridge_beta", "beta (prior weight)", value = 0.5, min = 0, max = 0.99, step = 0.05)
+              ),
+              layout_columns(col_widths = c(6, 6),
+                numericInput("bridge_lambda2", "lambda2 (fused)", value = 0.05, min = 0, step = 0.01),
+                numericInput("bridge_lambda1", "lambda1 (cohesion)", value = 0.25, min = 0, step = 0.05)
+              ),
+              textInput("bridge_resolution", "Resolution grid (comma-separated)", value = "0.5, 1, 1.5, 2"),
+              sliderInput("bridge_tau", "tau (stability threshold)", min = 0, max = 1, value = 0.6, step = 0.05)
+            )
+          )
+        ),
         tags$div(style = "display:flex; align-items:center; gap:4px; margin-bottom:4px;",
           tags$label("Group size filter", style = "margin:0;"),
           help_tip("Groups smaller than Min or larger than Max are dropped. Keeps analysis focused on reasonably sized gene sets.")
@@ -1321,10 +1389,20 @@ server <- function(input, output, session) {
         setProgress(0.2, detail = "Expression file OK...")
 
         # ── Quick-validate grouping file ────────────────────────────────
-        grp_is_gmt <- (fmt == "gmt") ||
-                       (fmt == "auto" && tolower(tools::file_ext(groups_name)) == "gmt")
+        # Grouping method: "file" (predefined) or "bridge" (data-driven).
+        method <- input$grouping_method %||% "file"
+        prior_source <- input$bridge_prior_source %||% "none"
+        # A grouping file is used for the file method, or for BRIDGE when the
+        # prior graph is derived from a grouping file.
+        need_groups_file <- method == "file" ||
+                            (method == "bridge" && prior_source == "groups")
 
-        if (!grp_is_gmt) {
+        grp_is_gmt <- (fmt == "gmt") ||
+                       (fmt == "auto" &&
+                        tolower(tools::file_ext(groups_name %||% "")) == "gmt")
+
+        if (need_groups_file && !is.null(groups_path) && nzchar(groups_path) &&
+            !grp_is_gmt) {
           grp_peek <- tryCatch(
             data.table::fread(groups_path, nrows = 3, header = TRUE, check.names = FALSE),
             error = function(e) NULL
@@ -1357,21 +1435,79 @@ server <- function(input, output, session) {
         output$expr_file_status <- renderUI(
           tags$div(class = "text-success mt-1", "\u2705 Expression data loaded")
         )
-        setProgress(0.5, detail = "Reading groups...")
+        # \u2500\u2500 Build the grouping via the selected method \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        if (method == "bridge") {
+          setProgress(0.5, detail = "Running BRIDGE grouping...")
 
-        # Read groups (resolve auto-detect from the file extension)
-        if (fmt == "auto") {
-          ext <- tolower(tools::file_ext(groups_name))
-          fmt <- if (ext == "gmt") "gmt" else "csv"
-        }
-        groups <- if (fmt == "gmt") {
-          read_gmt(groups_path)
+          # Assemble the prior source for BRIDGE.
+          prior_groups <- NULL; prior_file <- NULL
+          if (prior_source == "groups") {
+            if (is.null(groups_path) || !nzchar(groups_path)) {
+              stop("BRIDGE prior source is 'grouping file' but no grouping file ",
+                   "was provided. Upload one or choose a different prior source.")
+            }
+            if (fmt == "auto") {
+              ext <- tolower(tools::file_ext(groups_name))
+              fmt <- if (ext == "gmt") "gmt" else "csv"
+            }
+            prior_groups <- if (fmt == "gmt") read_gmt(groups_path) else
+                            read_groups(groups_path)
+          } else if (prior_source == "file") {
+            prior_file <- input$bridge_prior_file$datapath
+            if (is.null(prior_file) || !nzchar(prior_file)) {
+              stop("BRIDGE prior source is 'edge list / matrix' but no file was ",
+                   "uploaded.")
+            }
+          }
+
+          # Parse the resolution grid text field into a numeric vector.
+          res_grid <- as.numeric(strsplit(
+            input$bridge_resolution %||% "0.5,1,1.5,2", "[,[:space:]]+")[[1]])
+          res_grid <- res_grid[is.finite(res_grid) & res_grid > 0]
+          if (!length(res_grid)) res_grid <- c(0.5, 1, 1.5, 2)
+
+          groups <- compute_grouping(
+            "bridge",
+            X = expr_data$expr, y = expr_data$labels,
+            prior_source = prior_source,
+            prior_groups = prior_groups, prior_file = prior_file,
+            bridge_args = list(
+              lambda    = input$bridge_lambda %||% 0.1,
+              beta      = input$bridge_beta %||% 0.5,
+              lambda2   = input$bridge_lambda2 %||% 0.05,
+              lambda1   = input$bridge_lambda1 %||% 0.25,
+              resolution = res_grid,
+              tau       = input$bridge_tau %||% 0.6,
+              data_type = input$bridge_data_type %||% "gaussian",
+              min_size  = input$min_group_size,
+              max_size  = input$max_group_size,
+              verbose   = FALSE
+            )
+          )
+          if (length(groups) == 0) {
+            stop("BRIDGE produced no groups passing its filters. Try lowering ",
+                 "tau or the minimum group size, or adjusting lambda.")
+          }
+          output$groups_file_status <- renderUI(
+            tags$div(class = "text-success mt-1",
+                     sprintf("\u2705 BRIDGE derived %d group(s)", length(groups)))
+          )
         } else {
-          read_groups(groups_path)
+          setProgress(0.5, detail = "Reading groups...")
+          # Read groups (resolve auto-detect from the file extension)
+          if (fmt == "auto") {
+            ext <- tolower(tools::file_ext(groups_name))
+            fmt <- if (ext == "gmt") "gmt" else "csv"
+          }
+          groups <- if (fmt == "gmt") {
+            read_gmt(groups_path)
+          } else {
+            read_groups(groups_path)
+          }
+          output$groups_file_status <- renderUI(
+            tags$div(class = "text-success mt-1", "\u2705 Grouping file loaded")
+          )
         }
-        output$groups_file_status <- renderUI(
-          tags$div(class = "text-success mt-1", "\u2705 Grouping file loaded")
-        )
 
         setProgress(0.8, detail = "Building dataset...")
 
@@ -1388,7 +1524,9 @@ server <- function(input, output, session) {
         rv$loaded    <- TRUE
         rv$dataset_name <- tools::file_path_sans_ext(basename(expr_path))
         rv$expr_file_path <- normalizePath(expr_path, mustWork = FALSE)
-        rv$groups_file_path <- normalizePath(groups_path, mustWork = FALSE)
+        rv$groups_file_path <- if (!is.null(groups_path) && nzchar(groups_path))
+          normalizePath(groups_path, mustWork = FALSE) else ""
+        rv$grouping_method <- method
 
         # Reset downstream
         rv$collapsed <- FALSE
@@ -1476,9 +1614,19 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$btn_load, {
-    req(input$expr_file, input$groups_file)
-    load_into_rv(input$expr_file$datapath, input$groups_file$datapath,
-                 input$groups_file$name, input$groups_format)
+    req(input$expr_file)
+    method <- input$grouping_method %||% "file"
+    prior_source <- input$bridge_prior_source %||% "none"
+    needs_file <- method == "file" ||
+                  (method == "bridge" && prior_source == "groups")
+    if (needs_file && is.null(input$groups_file)) {
+      showNotification(
+        "❌ Please upload a grouping file (or, for BRIDGE, choose a different prior source).",
+        type = "error", duration = 8); return()
+    }
+    load_into_rv(input$expr_file$datapath,
+                 input$groups_file$datapath %||% "",
+                 input$groups_file$name %||% "", input$groups_format)
   })
 
   # Load a selected example: either the bundled toy data (inst/extdata) or one
@@ -3201,7 +3349,17 @@ server <- function(input, output, session) {
       settings <- gsmR::read_settings(input$import_settings$datapath)
       
       # Update UI inputs based on parsed YAML
+      if (!is.null(settings$grouping_method)) updateSelectInput(session, "grouping_method", selected = settings$grouping_method)
       if (!is.null(settings$groups_format)) updateSelectInput(session, "groups_format", selected = settings$groups_format)
+      # BRIDGE hyperparameters
+      if (!is.null(settings$bridge_prior_source)) updateSelectInput(session, "bridge_prior_source", selected = settings$bridge_prior_source)
+      if (!is.null(settings$bridge_data_type)) updateSelectInput(session, "bridge_data_type", selected = settings$bridge_data_type)
+      if (!is.null(settings$bridge_lambda)) updateNumericInput(session, "bridge_lambda", value = as.numeric(settings$bridge_lambda))
+      if (!is.null(settings$bridge_beta)) updateNumericInput(session, "bridge_beta", value = as.numeric(settings$bridge_beta))
+      if (!is.null(settings$bridge_lambda2)) updateNumericInput(session, "bridge_lambda2", value = as.numeric(settings$bridge_lambda2))
+      if (!is.null(settings$bridge_lambda1)) updateNumericInput(session, "bridge_lambda1", value = as.numeric(settings$bridge_lambda1))
+      if (!is.null(settings$bridge_resolution)) updateTextInput(session, "bridge_resolution", value = settings$bridge_resolution)
+      if (!is.null(settings$bridge_tau)) updateSliderInput(session, "bridge_tau", value = as.numeric(settings$bridge_tau))
       if (!is.null(settings$min_group_size)) updateNumericInput(session, "min_group_size", value = as.numeric(settings$min_group_size))
       if (!is.null(settings$max_group_size)) updateNumericInput(session, "max_group_size", value = as.numeric(settings$max_group_size))
       
@@ -3264,7 +3422,16 @@ server <- function(input, output, session) {
         current_values <- list(
           expression_file = rv$expr_file_path %||% "",
           groups_file = rv$groups_file_path %||% "",
+          grouping_method = input$grouping_method,
           groups_format = input$groups_format,
+          bridge_prior_source = input$bridge_prior_source,
+          bridge_data_type = input$bridge_data_type,
+          bridge_lambda = input$bridge_lambda,
+          bridge_beta = input$bridge_beta,
+          bridge_lambda2 = input$bridge_lambda2,
+          bridge_lambda1 = input$bridge_lambda1,
+          bridge_resolution = input$bridge_resolution,
+          bridge_tau = input$bridge_tau,
           min_group_size = input$min_group_size,
           max_group_size = input$max_group_size,
           collapse_method = input$collapse_method,
