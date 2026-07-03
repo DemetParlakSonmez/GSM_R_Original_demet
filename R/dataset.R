@@ -18,10 +18,19 @@ NULL
 #'   Groups below this threshold are dropped. Default `5`.
 #' @param max_group_size Maximum number of genes in a group. Groups above this
 #'   threshold are dropped. Default `500`.
+#' @param grouping_spec Optional recipe describing how to (re)derive groups from
+#'   data, used by data-driven methods such as BRIDGE so that grouping can be
+#'   recomputed **on the training samples of each cross-validation fold**
+#'   (leakage-free). A named list with components `method` (e.g. `"bridge"`),
+#'   `prior` (a label-free prior graph, built once and reused every fold),
+#'   `args` (hyperparameters forwarded to the grouping function), and optional
+#'   `prefilter` / `precision_method`. `NULL` (default) means the `groups`
+#'   passed in are fixed (the file-based behavior); folds use them as-is.
 #' @return An S3 object of class `gsm_dataset`.
 #' @export
 gsm_dataset <- function(expr, labels, groups,
-                        min_group_size = 5, max_group_size = 500) {
+                        min_group_size = 5, max_group_size = 500,
+                        grouping_spec = NULL) {
   # --- Validate inputs ---
   if (!is.matrix(expr) || !is.numeric(expr)) {
     stop("`expr` must be a numeric matrix (genes x samples).")
@@ -39,9 +48,14 @@ gsm_dataset <- function(expr, labels, groups,
   # Check sample matching
   check_sample_match(expr, labels)
 
-  if (!is.list(groups) || is.null(names(groups))) {
+  # A data-driven grouping (grouping_spec present) may be "deferred": no groups
+  # at construction time because they are re-derived per CV fold. Allow an empty
+  # list in that case; otherwise a named list of gene vectors is required.
+  deferred <- !is.null(grouping_spec) && length(groups) == 0
+  if (!deferred && (!is.list(groups) || is.null(names(groups)))) {
     stop("`groups` must be a named list of character vectors.")
   }
+  if (is.null(groups)) groups <- list()
 
   # --- Intersect genes ---
   available_genes <- rownames(expr)
@@ -65,7 +79,7 @@ gsm_dataset <- function(expr, labels, groups,
     max_size = max_group_size
   )
 
-  if (length(filtered_groups) == 0) {
+  if (length(filtered_groups) == 0 && !deferred) {
     stop("No groups remain after filtering. Check gene ID matching between ",
          "expression matrix and grouping file.")
   }
@@ -75,13 +89,15 @@ gsm_dataset <- function(expr, labels, groups,
     expr   = expr,
     labels = labels,
     groups = filtered_groups,
+    grouping_spec = grouping_spec,
     params = list(
       min_group_size = min_group_size,
       max_group_size = max_group_size,
       n_samples      = ncol(expr),
       n_genes        = nrow(expr),
       n_groups       = length(filtered_groups),
-      n_classes      = length(levels(labels))
+      n_classes      = length(levels(labels)),
+      grouping_method = if (is.null(grouping_spec)) "file" else grouping_spec$method
     )
   )
   class(obj) <- "gsm_dataset"

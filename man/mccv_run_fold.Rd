@@ -17,6 +17,8 @@ mccv_run_fold(
   top_n = 10,
   shave = TRUE,
   fdr_alpha = 0.05,
+  shave_method = "fdr",
+  shave_k = 100,
   normalize = FALSE,
   seed = 42
 )

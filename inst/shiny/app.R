@@ -69,7 +69,70 @@ value_box_ui <- function(value, label, icon = NULL) {
 # Friendly classifier name + a "key = value" string of its hyperparameters.
 classifier_label <- function(method) {
   switch(method, rf = "Random Forest", svm = "Support Vector Machine",
-         knn = "K-Nearest Neighbors", method)
+         knn = "K-Nearest Neighbors", xgb = "XGBoost", method)
+}
+
+# Snapshot the run settings (with concrete numbers) so the GSM tab can show
+# exactly what a run used — grouping, shaving, pre-score, scoring, modeling.
+build_run_config <- function(input, rv) {
+  ds <- rv$dataset
+  gm <- ds$params$grouping_method %||% "file"
+
+  # -- Grouping section --
+  grouping <- list("Method" = if (gm == "bridge") "BRIDGE (data-driven)" else "From file")
+  if (gm == "bridge") {
+    spec <- ds$grouping_spec
+    a <- spec$args %||% list()
+    prior_n <- length(unique(unlist(spec$prior)))
+    grouping[["Prior graph"]] <- if (prior_n > 0)
+      sprintf("%s (%d genes)", input$bridge_prior_source %||% "none", prior_n)
+      else (input$bridge_prior_source %||% "none")
+    grouping[["Speed pre-filter"]] <- a$prefilter %||% "none"
+    if (!is.null(a$max_genes)) grouping[["Max genes"]] <- a$max_genes
+    grouping[["Estimator"]] <- a$precision_method %||% "glasso"
+    grouping[["Data type"]] <- a$data_type %||% "gaussian"
+    grouping[["lambda / beta"]] <- sprintf("%.3g / %.3g", a$lambda %||% 0.1, a$beta %||% 0.5)
+    grouping[["tau (stability)"]] <- a$tau %||% 0.6
+    grouping[["Resolutions"]] <- paste(a$resolution %||% c(0.5,1,1.5,2), collapse = ", ")
+    grouping[["Groups"]] <- "re-derived per training fold"
+  } else {
+    grouping[["Groups loaded"]] <- ds$params$n_groups
+    grouping[["Group size range"]] <- sprintf("%d – %d",
+      ds$params$min_group_size %||% 5, ds$params$max_group_size %||% 500)
+  }
+
+  # -- Gene shaving section --
+  if (isTRUE(input$shave_genes)) {
+    shaving <- list("Enabled" = "Yes (Welch t-test, train-only)")
+    if (identical(input$shave_method, "topk"))
+      shaving[["Rule"]] <- sprintf("Top-K = %s genes", input$shave_k %||% 100)
+    else
+      shaving[["Rule"]] <- sprintf("BH-FDR alpha = %s", input$fdr_alpha %||% 0.05)
+  } else shaving <- list("Enabled" = "No")
+
+  # -- Scoring / modeling section --
+  mccv <- isTRUE(input$run_mccv_mode)
+  scoring <- list(
+    "Mode" = if (mccv) "Parallel MCCV" else "Single split",
+    "Pre-score" = sprintf("%s (top %s%%)", input$prescore_method %||% "none",
+                          if (identical(input$score_scope, "all")) "100" else input$top_percent),
+    "Group scorer" = classifier_label(input$score_method),
+    "Final model" = classifier_label(if (mccv && input$model_method != "same")
+                                       input$model_method else input$score_method),
+    "Accumulative K" = input$n_top_groups,
+    "Z-score norm" = if (isTRUE(input$normalize_z)) "on (train-fit)" else "off"
+  )
+  if (mccv) {
+    scoring[["Iterations"]] <- input$mccv_iterations
+    scoring[["Train ratio"]] <- input$mccv_train_ratio
+    scoring[["Cores"]] <- input$mccv_cores
+  } else {
+    scoring[["Train ratio"]] <- input$train_ratio
+  }
+
+  list(grouping = grouping, shaving = shaving, scoring = scoring,
+       dataset = sprintf("%d samples × %d genes",
+                         ds$params$n_samples, ds$params$n_genes))
 }
 format_params <- function(args) {
   if (length(args) == 0) return("defaults")
@@ -149,6 +212,21 @@ nav_step_title <- function(n, icon, label) {
   )
 }
 
+# Utility tabs (Session, Batch): no step number — they are tools/modes, not
+# sequential pipeline steps, so they read differently from the numbered flow.
+nav_util_title <- function(icon, label) {
+  tags$span(
+    class = "nav-step-title nav-util",
+    tags$span(class = "nav-ico", icon),
+    tags$span(class = "nav-lbl", label)
+  )
+}
+
+# A small chevron shown between the numbered pipeline steps to signal order.
+nav_flow_sep <- function() {
+  bslib::nav_item(tags$span(class = "nav-step-sep", "›"))
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
@@ -158,6 +236,8 @@ ui <- page_navbar(
     tags$span(style = "font-weight:300; opacity:0.6; margin-left:8px;",
               "Grouping \u2022 Scoring \u2022 Modeling")
   ),
+  # Fixed tab bar: never collapse into a hamburger; tabs stay visible at any width.
+  navbar_options = navbar_options(collapsible = FALSE),
   theme = bs_theme(
     version = 5,
     bootswatch = "darkly",
@@ -185,6 +265,23 @@ ui <- page_navbar(
       }
       .navbar-brand { color: #ffffff !important; font-size: 1.15rem; }
       .navbar-nav { gap: 4px; }
+
+      /* ── Fixed tab bar: one row, never collapse; scroll if truly too narrow ── */
+      .navbar > .container-fluid { flex-wrap: nowrap; }
+      .navbar .navbar-collapse { display: flex !important; flex-basis: auto; }
+      .navbar-nav { flex-wrap: nowrap; align-items: center; }
+      .navbar-nav.me-auto, .navbar .navbar-nav:first-of-type {
+        overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
+      }
+      .navbar-nav .nav-lbl { white-space: nowrap; }
+
+      /* Utility tabs (right group): muted, un-numbered, separated from the flow. */
+      .nav-util { opacity: 0.92; }
+      .nav-util .nav-lbl { font-weight: 500; }
+      .nav-vrule {
+        display: inline-block; width: 1px; height: 24px;
+        background: rgba(255,255,255,0.15); margin: 0 8px; align-self: center;
+      }
       
       /* Sidebar overflow visible for tooltips */
       .sidebar { overflow: visible !important; }
@@ -375,24 +472,111 @@ ui <- page_navbar(
           uiOutput("expr_file_status")
         ),
         tags$hr(),
-        # -- Grouping file + options --
-        tags$div(
-          class = "upload-area",
-          tags$div(style = "display:flex; align-items:center; gap:4px; ",
-            tags$label("\U0001F5C2\uFE0F Grouping File"),
-            help_tip("2-column CSV (gene, group) or GMT format. Maps genes to functional groups (pathways, GO terms, etc.).")
-          ),
-          fileInput("groups_file", NULL, accept = c(".csv", ".tsv", ".gmt", ".txt")),
-          uiOutput("groups_file_status")
-        ),
+        # -- Grouping method selector (extensible: more methods can be added) --
         tags$div(style = "display:flex; align-items:center; gap:4px;",
-          tags$label("Format", style = "margin:0;"),
-          help_tip("Auto-detect picks CSV or GMT based on file extension. Override if the wrong format is detected.")
+          tags$label("\U0001F9E9 Grouping Method", style = "margin:0;"),
+          help_tip("How groups of genes are formed. 'From file' uses a predefined grouping (pathways, disease sets, GO). 'BRIDGE' derives groups data-drivenly from expression + class labels, regularized by a prior biological graph.")
         ),
-        selectInput("groups_format", NULL,
-                    choices = c("Auto-detect" = "auto",
-                                "2-column CSV" = "csv",
-                                "GMT" = "gmt")),
+        selectInput("grouping_method", NULL,
+                    choices = c("From file (CSV/GMT)" = "file",
+                                "BRIDGE (data-driven + prior)" = "bridge")),
+
+        # \u2500\u2500 BRIDGE intro + prior source (shown only for BRIDGE) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        conditionalPanel(
+          condition = "input.grouping_method == 'bridge'",
+          tags$div(class = "text-muted",
+                   style = "font-size:0.8rem; margin-bottom:6px;",
+                   "BRIDGE builds groups from your expression matrix and class labels, penalized toward a prior biological graph. No predefined grouping is required."),
+          tags$div(style = "display:flex; align-items:center; gap:4px;",
+            tags$label("Prior graph source", style = "margin:0;"),
+            help_tip("The prior biological graph B nudges related genes together. 'Grouping file' reuses a pathway/disease file (genes sharing a group get a prior edge). 'Edge list' uploads a (gene_i, gene_j, weight) CSV. 'None' runs purely data-driven (B = 0).")
+          ),
+          selectInput("bridge_prior_source", NULL,
+                      choices = c("Grouping file (reuse below)" = "groups",
+                                  "Edge list / matrix upload" = "file",
+                                  "None (data-driven)" = "none"))
+        ),
+
+        # \u2500\u2500 Shared grouping-file input (single input id, no duplication) \u2500\u2500
+        # Shown for the file method, and for BRIDGE when its prior is a grouping file.
+        conditionalPanel(
+          condition = "input.grouping_method == 'file' || (input.grouping_method == 'bridge' && input.bridge_prior_source == 'groups')",
+          tags$div(
+            class = "upload-area",
+            tags$div(style = "display:flex; align-items:center; gap:4px; ",
+              tags$label("\U0001F5C2\uFE0F Grouping File"),
+              help_tip("2-column CSV (gene, group) or GMT format. Maps genes to functional groups (pathways, GO terms, etc.). For BRIDGE this file builds the prior graph B.")
+            ),
+            fileInput("groups_file", NULL, accept = c(".csv", ".tsv", ".gmt", ".txt")),
+            uiOutput("groups_file_status")
+          ),
+          tags$div(style = "display:flex; align-items:center; gap:4px;",
+            tags$label("Format", style = "margin:0;"),
+            help_tip("Auto-detect picks CSV or GMT based on file extension. Override if the wrong format is detected.")
+          ),
+          selectInput("groups_format", NULL,
+                      choices = c("Auto-detect" = "auto",
+                                  "2-column CSV" = "csv",
+                                  "GMT" = "gmt"))
+        ),
+
+        # \u2500\u2500 BRIDGE-specific inputs \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        conditionalPanel(
+          condition = "input.grouping_method == 'bridge'",
+          conditionalPanel(
+            condition = "input.bridge_prior_source == 'file'",
+            tags$div(class = "upload-area",
+              tags$div(style = "display:flex; align-items:center; gap:4px; ",
+                tags$label("\U0001F517 Prior edge list"),
+                help_tip("CSV with columns: gene_i, gene_j, weight (weight in [0,1]). Symmetric relatedness between genes.")
+              ),
+              fileInput("bridge_prior_file", NULL, accept = c(".csv", ".tsv", ".txt"))
+            )
+          ),
+          tags$div(style = "display:flex; align-items:center; gap:4px; margin-top:4px;",
+            tags$label("Data type", style = "margin:0;"),
+            help_tip("'Gaussian' assumes roughly normal data. 'Nonparanormal' applies a rank-based transform first (huge.npn) for skewed data. 'Compositional' (microbiome) is not yet available.")
+          ),
+          selectInput("bridge_data_type", NULL,
+                      choices = c("Gaussian" = "gaussian",
+                                  "Nonparanormal" = "nonparanormal",
+                                  "Compositional (coming soon)" = "compositional")),
+          tags$div(style = "display:flex; align-items:center; gap:4px; margin-top:4px;",
+            tags$label("Speed pre-filter", style = "margin:0;"),
+            help_tip("Reduces the gene count BEFORE estimation so per-fold BRIDGE is affordable. Label-blind (never uses class labels), so it does not cause overfitting. 'Variance' keeps the most variable genes; 'Prior' keeps only genes in the prior graph.")
+          ),
+          selectInput("bridge_prefilter", NULL,
+                      choices = c("None" = "none",
+                                  "Top-variance genes" = "variance",
+                                  "Prior-graph genes only" = "prior")),
+          checkboxInput("bridge_preview",
+                        "Compute discovery preview now (slower)", value = FALSE),
+          tags$small(class = "text-muted d-block",
+                     style = "margin-top:-6px; margin-bottom:6px;",
+                     "Off = fast load; BRIDGE groups are derived per training fold during Score / MCCV. On = also run an all-samples preview now (exploratory)."),
+          tags$details(
+            tags$summary(class = "text-muted", style = "cursor:pointer; font-size:0.85rem;",
+                         "\u2699\uFE0F Advanced hyperparameters"),
+            tags$div(style = "margin-top:6px;",
+              layout_columns(col_widths = c(6, 6),
+                numericInput("bridge_lambda", "lambda (sparsity)", value = 0.1, min = 0, step = 0.01),
+                numericInput("bridge_beta", "beta (prior weight)", value = 0.5, min = 0, max = 0.99, step = 0.05)
+              ),
+              layout_columns(col_widths = c(6, 6),
+                numericInput("bridge_lambda2", "lambda2 (fused)", value = 0.05, min = 0, step = 0.01),
+                numericInput("bridge_lambda1", "lambda1 (cohesion)", value = 0.25, min = 0, step = 0.05)
+              ),
+              textInput("bridge_resolution", "Resolution grid (comma-separated)", value = "0.5, 1, 1.5, 2"),
+              sliderInput("bridge_tau", "tau (stability threshold)", min = 0, max = 1, value = 0.6, step = 0.05),
+              layout_columns(col_widths = c(6, 6),
+                selectInput("bridge_precision", "Estimator",
+                            choices = c("glasso (O(p^3))" = "glasso",
+                                        "mb / fast (O(p^2))" = "mb")),
+                numericInput("bridge_max_genes", "Max genes (pre-filter cap)", value = NA, min = 10, step = 50)
+              )
+            )
+          )
+        ),
         tags$div(style = "display:flex; align-items:center; gap:4px; margin-bottom:4px;",
           tags$label("Group size filter", style = "margin:0;"),
           help_tip("Groups smaller than Min or larger than Max are dropped. Keeps analysis focused on reasonably sized gene sets.")
@@ -455,6 +639,7 @@ ui <- page_navbar(
   ),
 
   # ── Tab 2: Replicate Collapsing ──────────────────────────────────────────
+  nav_flow_sep(),
   nav_panel(
     value = "replicates",
     title = nav_step_title("2", "\U0001F501", "Replicates"),
@@ -525,6 +710,7 @@ ui <- page_navbar(
   ),
 
   # ── Tab 3: Pre-Scoring ──────────────────────────────────────────────────
+  nav_flow_sep(),
   nav_panel(
     value = "prescore",
     title = nav_step_title("3", "\U0001F4CA", "Pre-Score"),
@@ -660,12 +846,13 @@ ui <- page_navbar(
   ),
 
   # ── Tab 4: Scoring ─────────────────────────────────────────────────────
+  nav_flow_sep(),
   nav_panel(
     value = "score",
-    title = nav_step_title("4", "\U0001F3AF", "Score"),
+    title = nav_step_title("4", "\U0001F3AF", "GSM"),
     layout_sidebar(
       sidebar = sidebar(
-        title = "\U2699\UFE0F Score — Settings",
+        title = "\U2699\UFE0F GSM — Settings",
         width = 340,
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           tags$label("Classifier"),
@@ -702,15 +889,30 @@ ui <- page_navbar(
           numericInput("knn_k", "Neighbors (k)", value = 3, min = 1, max = 20, step = 1)
         ),
         
-        # Phase I gene shaving: training-only Welch t-test + BH-FDR filter.
+        # Phase I gene shaving: training-only Welch t-test filter (FDR or top-k).
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           checkboxInput("shave_genes", "Gene shaving", value = TRUE),
-          help_tip("Remove non-significant genes per group using Welch t-test + BH FDR correction. Computed on training data only to avoid leakage.")
+          help_tip("Rank genes by a per-gene Welch two-sample t-test on the TRAINING samples only (no leakage), then keep the significant ones. Choose the selection rule below.")
         ),
         conditionalPanel(
           condition = "input.shave_genes",
-          numericInput("fdr_alpha", "FDR threshold (alpha)",
-                       value = 0.05, min = 0.001, max = 0.5, step = 0.01)
+          tags$div(style = "display:flex; align-items:center; gap:4px;",
+            tags$label("Selection rule", style = "margin:0;"),
+            help_tip("FDR: keep genes below a Benjamini-Hochberg adjusted p-value (count varies per fold). Top-K: keep a fixed number of the most significant genes each fold.")
+          ),
+          selectInput("shave_method", NULL,
+                      choices = c("BH-FDR threshold" = "fdr",
+                                  "Top-K genes" = "topk")),
+          conditionalPanel(
+            condition = "input.shave_method == 'fdr'",
+            numericInput("fdr_alpha", "FDR threshold (alpha)",
+                         value = 0.05, min = 0.001, max = 0.5, step = 0.01)
+          ),
+          conditionalPanel(
+            condition = "input.shave_method == 'topk'",
+            numericInput("shave_k", "Top-K genes to keep",
+                         value = 100, min = 2, step = 10)
+          )
         ),
         checkboxInput("normalize_z",
                       "Z-score normalize (per-fold, train-fit)", value = FALSE),
@@ -762,9 +964,16 @@ ui <- page_navbar(
       # ── Always-visible status alert (readiness / what's happening) ──────
       uiOutput("score_status_alert"),
 
+      # ── Run configuration: what THIS run used (grouping, shaving, …) ────
+      uiOutput("gsm_run_config"),
+
       # ── Live view while Parallel MCCV is running ───────────────────────
       conditionalPanel(
         condition = "output.mccv_running",
+        tags$div(class = "d-flex justify-content-end mb-2",
+          actionButton("btn_stop_score", "⏹️ Stop run",
+                       class = "btn-danger btn-sm")
+        ),
         uiOutput("mccv_live_status"),
         layout_columns(
           col_widths = c(6, 6),
@@ -776,6 +985,10 @@ ui <- page_navbar(
             card_header("Live: running metric averages"),
             uiOutput("mccv_live_means")
           )
+        ),
+        card(full_screen = TRUE,
+          card_header("Groups created — most recent completed fold"),
+          DTOutput("gsm_live_groups")
         )
       ),
 
@@ -1013,9 +1226,12 @@ ui <- page_navbar(
   ),
 
   # ── Tab 5: File ────────────────────────────────────────────────────
+  # ── Utilities (right group): tools/modes, not sequential pipeline steps ──
+  nav_spacer(),
+  nav_item(tags$span(class = "nav-vrule")),
   nav_panel(
     value = "file_menu",
-    title = nav_step_title("5", "📁", "File"),
+    title = nav_util_title("💾", "Session"),
     card(
       card_header("📝 Import & Export Parameters"),
       tags$p("Save your current analysis parameters to a YAML file to share or reuse later, or load an existing configuration."),
@@ -1070,7 +1286,7 @@ ui <- page_navbar(
   # ── Tab 6: Batch ───────────────────────────────────────────────────
   nav_panel(
     value = "batch",
-    title = nav_step_title("6", "\U0001F9EE", "Batch"),
+    title = nav_util_title("\U0001F9EE", "Batch"),
     layout_sidebar(
       sidebar = sidebar(
         title = "\U2699\UFE0F Batch — Setup", width = 360,
@@ -1191,12 +1407,11 @@ ui <- page_navbar(
     )
   ),
 
-  # ── Footer ─────────────────────────────────────────────────────────────
-  nav_spacer(),
+  # ── GitHub link (stays in the right utility cluster) ────────────────────
   nav_item(
     tags$a(href = "https://github.com/jallmer/GSM4R",
            target = "_blank",
-           style = "color: #888; font-size: 0.8rem;",
+           style = "color: #888; font-size: 0.8rem; align-self: center;",
            "GitHub \U0001F517")
   )
 )
@@ -1321,10 +1536,20 @@ server <- function(input, output, session) {
         setProgress(0.2, detail = "Expression file OK...")
 
         # ── Quick-validate grouping file ────────────────────────────────
-        grp_is_gmt <- (fmt == "gmt") ||
-                       (fmt == "auto" && tolower(tools::file_ext(groups_name)) == "gmt")
+        # Grouping method: "file" (predefined) or "bridge" (data-driven).
+        method <- input$grouping_method %||% "file"
+        prior_source <- input$bridge_prior_source %||% "none"
+        # A grouping file is used for the file method, or for BRIDGE when the
+        # prior graph is derived from a grouping file.
+        need_groups_file <- method == "file" ||
+                            (method == "bridge" && prior_source == "groups")
 
-        if (!grp_is_gmt) {
+        grp_is_gmt <- (fmt == "gmt") ||
+                       (fmt == "auto" &&
+                        tolower(tools::file_ext(groups_name %||% "")) == "gmt")
+
+        if (need_groups_file && !is.null(groups_path) && nzchar(groups_path) &&
+            !grp_is_gmt) {
           grp_peek <- tryCatch(
             data.table::fread(groups_path, nrows = 3, header = TRUE, check.names = FALSE),
             error = function(e) NULL
@@ -1357,29 +1582,126 @@ server <- function(input, output, session) {
         output$expr_file_status <- renderUI(
           tags$div(class = "text-success mt-1", "\u2705 Expression data loaded")
         )
-        setProgress(0.5, detail = "Reading groups...")
+        # \u2500\u2500 Build the grouping via the selected method \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        if (method == "bridge") {
+          setProgress(0.5, detail = "Running BRIDGE grouping...")
 
-        # Read groups (resolve auto-detect from the file extension)
-        if (fmt == "auto") {
-          ext <- tolower(tools::file_ext(groups_name))
-          fmt <- if (ext == "gmt") "gmt" else "csv"
-        }
-        groups <- if (fmt == "gmt") {
-          read_gmt(groups_path)
+          # Assemble the prior source for BRIDGE.
+          prior_groups <- NULL; prior_file <- NULL
+          if (prior_source == "groups") {
+            if (is.null(groups_path) || !nzchar(groups_path)) {
+              stop("BRIDGE prior source is 'grouping file' but no grouping file ",
+                   "was provided. Upload one or choose a different prior source.")
+            }
+            if (fmt == "auto") {
+              ext <- tolower(tools::file_ext(groups_name))
+              fmt <- if (ext == "gmt") "gmt" else "csv"
+            }
+            prior_groups <- if (fmt == "gmt") read_gmt(groups_path) else
+                            read_groups(groups_path)
+          } else if (prior_source == "file") {
+            prior_file <- input$bridge_prior_file$datapath
+            if (is.null(prior_file) || !nzchar(prior_file)) {
+              stop("BRIDGE prior source is 'edge list / matrix' but no file was ",
+                   "uploaded.")
+            }
+          }
+
+          # Parse the resolution grid text field into a numeric vector.
+          res_grid <- as.numeric(strsplit(
+            input$bridge_resolution %||% "0.5,1,1.5,2", "[,[:space:]]+")[[1]])
+          res_grid <- res_grid[is.finite(res_grid) & res_grid > 0]
+          if (!length(res_grid)) res_grid <- c(0.5, 1, 1.5, 2)
+
+          max_genes <- suppressWarnings(as.integer(input$bridge_max_genes))
+          if (length(max_genes) == 0 || is.na(max_genes) || max_genes <= 0)
+            max_genes <- NULL
+
+          # Resolve the label-free prior ONCE so the same object can be reused
+          # for every CV fold (stored on grouping_spec below).
+          prior_obj <- switch(prior_source,
+            none   = NULL,
+            groups = prior_groups,
+            file   = bridge_read_prior_file(prior_file))
+
+          bridge_args <- list(
+            lambda    = input$bridge_lambda %||% 0.1,
+            beta      = input$bridge_beta %||% 0.5,
+            lambda2   = input$bridge_lambda2 %||% 0.05,
+            lambda1   = input$bridge_lambda1 %||% 0.25,
+            resolution = res_grid,
+            tau       = input$bridge_tau %||% 0.6,
+            data_type = input$bridge_data_type %||% "gaussian",
+            precision_method = input$bridge_precision %||% "glasso",
+            prefilter = input$bridge_prefilter %||% "none",
+            max_genes = max_genes,
+            min_size  = input$min_group_size,
+            max_size  = input$max_group_size,
+            verbose   = FALSE
+          )
+
+          # Recipe carried on the dataset so folds re-derive groups train-only.
+          grouping_spec <- list(
+            method = "bridge",
+            prior  = prior_obj,
+            args   = bridge_args
+          )
+
+          if (isTRUE(input$bridge_preview)) {
+            # OPTIONAL discovery preview on all samples (slower, optimistic \u2014 the
+            # honest estimate comes from the per-fold recompute in Score / MCCV).
+            groups <- do.call(bridge_grouping,
+                              c(list(X = expr_data$expr, y = expr_data$labels,
+                                     B = prior_obj), bridge_args))
+            if (length(groups) == 0) {
+              stop("BRIDGE preview produced no groups. Try lowering tau or the ",
+                   "minimum group size, or adjusting lambda.")
+            }
+            output$groups_file_status <- renderUI(
+              tags$div(class = "text-success mt-1",
+                tags$div(sprintf("\u2705 BRIDGE preview: %d group(s)", length(groups))),
+                tags$small(class = "text-warning d-block",
+                           "Exploratory preview (all samples). Honest per-fold grouping runs during Score / MCCV.")
+              )
+            )
+          } else {
+            # Deferred: no preview computed. Groups are derived per training fold.
+            groups <- list()
+            output$groups_file_status <- renderUI(
+              tags$div(class = "text-success mt-1",
+                tags$div("\u2705 BRIDGE configured (deferred)"),
+                tags$small(class = "text-muted d-block",
+                           "Groups are derived per training fold during Score / MCCV. Tick 'Compute discovery preview now' to also preview on all samples.")
+              )
+            )
+          }
         } else {
-          read_groups(groups_path)
+          grouping_spec <- NULL
+          setProgress(0.5, detail = "Reading groups...")
+          # Read groups (resolve auto-detect from the file extension)
+          if (fmt == "auto") {
+            ext <- tolower(tools::file_ext(groups_name))
+            fmt <- if (ext == "gmt") "gmt" else "csv"
+          }
+          groups <- if (fmt == "gmt") {
+            read_gmt(groups_path)
+          } else {
+            read_groups(groups_path)
+          }
+          output$groups_file_status <- renderUI(
+            tags$div(class = "text-success mt-1", "\u2705 Grouping file loaded")
+          )
         }
-        output$groups_file_status <- renderUI(
-          tags$div(class = "text-success mt-1", "\u2705 Grouping file loaded")
-        )
 
         setProgress(0.8, detail = "Building dataset...")
 
-        # Build dataset
+        # Build dataset (grouping_spec = NULL for file grouping; a BRIDGE recipe
+        # otherwise, so CV folds re-derive groups on training samples only).
         ds <- gsm_dataset(
           expr_data$expr, expr_data$labels, groups,
           min_group_size = input$min_group_size,
-          max_group_size = input$max_group_size
+          max_group_size = input$max_group_size,
+          grouping_spec = grouping_spec
         )
 
         rv$expr_data <- expr_data
@@ -1388,7 +1710,9 @@ server <- function(input, output, session) {
         rv$loaded    <- TRUE
         rv$dataset_name <- tools::file_path_sans_ext(basename(expr_path))
         rv$expr_file_path <- normalizePath(expr_path, mustWork = FALSE)
-        rv$groups_file_path <- normalizePath(groups_path, mustWork = FALSE)
+        rv$groups_file_path <- if (!is.null(groups_path) && nzchar(groups_path))
+          normalizePath(groups_path, mustWork = FALSE) else ""
+        rv$grouping_method <- method
 
         # Reset downstream
         rv$collapsed <- FALSE
@@ -1476,9 +1800,19 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$btn_load, {
-    req(input$expr_file, input$groups_file)
-    load_into_rv(input$expr_file$datapath, input$groups_file$datapath,
-                 input$groups_file$name, input$groups_format)
+    req(input$expr_file)
+    method <- input$grouping_method %||% "file"
+    prior_source <- input$bridge_prior_source %||% "none"
+    needs_file <- method == "file" ||
+                  (method == "bridge" && prior_source == "groups")
+    if (needs_file && is.null(input$groups_file)) {
+      showNotification(
+        "❌ Please upload a grouping file (or, for BRIDGE, choose a different prior source).",
+        type = "error", duration = 8); return()
+    }
+    load_into_rv(input$expr_file$datapath,
+                 input$groups_file$datapath %||% "",
+                 input$groups_file$name %||% "", input$groups_format)
   })
 
   # Load a selected example: either the bundled toy data (inst/extdata) or one
@@ -1519,7 +1853,11 @@ server <- function(input, output, session) {
   })
   output$vbox_groups <- renderUI({
     req(rv$dataset)
-    value_box_ui(format(rv$dataset$params$n_groups, big.mark = ","), "Groups", "\U0001F5C2\uFE0F")
+    deferred <- identical(rv$dataset$params$grouping_method, "bridge") &&
+                rv$dataset$params$n_groups == 0
+    val <- if (deferred) "per-fold"
+           else format(rv$dataset$params$n_groups, big.mark = ",")
+    value_box_ui(val, if (deferred) "Groups (BRIDGE)" else "Groups", "\U0001F5C2\uFE0F")
   })
   output$vbox_classes <- renderUI({
     req(rv$dataset)
@@ -2025,6 +2363,9 @@ server <- function(input, output, session) {
       return()
     }
 
+    # ── Snapshot of what THIS run used (shown live in the config panel) ───────
+    rv$run_config <- build_run_config(input, rv)
+
     # 1. Package dependency validation
     methods_to_check <- unique(c(input$score_method, 
                                  if (input$run_mccv_mode && input$model_method != "same") input$model_method else input$score_method))
@@ -2081,15 +2422,31 @@ server <- function(input, output, session) {
           rv$train_idx <- split$train
         }
 
+        # Leakage-free grouping: for BRIDGE, RE-DERIVE groups on this run's
+        # TRAINING samples only (rather than the load-time preview groups, which
+        # saw all samples). File-based grouping is returned unchanged.
+        ds_run <- rv$dataset
+        if (!is.null(rv$dataset$grouping_spec) &&
+            identical(rv$dataset$grouping_spec$method, "bridge")) {
+          withProgress(message = "BRIDGE grouping (training samples only)...",
+                       value = 0.2, {
+            ds_run$groups <- grouping_for_fold(rv$dataset, rv$train_idx)
+          })
+          validate(need(length(ds_run$groups) > 0,
+                        "BRIDGE derived no groups on the training split. Lower tau or min group size."))
+          ds_run$params$n_groups <- length(ds_run$groups)
+          rv$prescore_groups <- NULL   # preview pre-scoring no longer applies
+        }
+
         # Candidate groups: all groups, or the pre-scored top set (auto if needed).
         scope_all <- identical(input$score_scope, "all")
         auto_prescored <- FALSE
         if (scope_all) {
-          candidates <- rv$dataset$groups
+          candidates <- ds_run$groups
         } else {
           candidates <- rv$prescore_groups
           if (is.null(candidates)) {
-            candidates <- pre_score_groups(rv$dataset, rv$train_idx,
+            candidates <- pre_score_groups(ds_run, rv$train_idx,
                                            method = input$prescore_method,
                                            top_percent = input$top_percent)
             auto_prescored <- TRUE
@@ -2103,14 +2460,16 @@ server <- function(input, output, session) {
           expr_use <- if (isTRUE(input$normalize_z))
             zscore_fit_apply(rv$dataset$expr, rv$train_idx) else rv$dataset$expr
 
-          # Phase I — training-only gene shaving (Welch t-test + BH FDR).
+          # Phase I — training-only gene shaving (Welch t-test; FDR or top-k).
           if (isTRUE(input$shave_genes)) {
             keep_genes <- shave_genes(expr_use, rv$dataset$labels,
-                                      rv$train_idx, alpha = input$fdr_alpha)
+                                      rv$train_idx, alpha = input$fdr_alpha,
+                                      method = input$shave_method %||% "fdr",
+                                      top_k = input$shave_k %||% 100)
             candidates <- shave_groups(candidates, keep_genes)
             n_shaved <- length(keep_genes)
             validate(need(length(candidates) > 0,
-                          "No groups survived gene shaving — raise the FDR threshold."))
+                          "No groups survived gene shaving — relax the FDR threshold or raise Top-K."))
           }
           K <- min(input$n_top_groups, length(candidates))
 
@@ -2168,7 +2527,10 @@ server <- function(input, output, session) {
           modeling = sprintf("accumulative top-1..%d (best k = %d)", K, best_k),
           best_k = best_k,
           gene_shaving = if (isTRUE(input$shave_genes))
-            sprintf("Welch t-test + BH FDR %.3g (%d genes kept)", input$fdr_alpha, n_shaved)
+            if (identical(input$shave_method, "topk"))
+              sprintf("Welch t-test, top-%d genes (%d kept)", input$shave_k %||% 100L, n_shaved)
+            else
+              sprintf("Welch t-test + BH FDR %.3g (%d genes kept)", input$fdr_alpha, n_shaved)
             else "off",
           scope = if (scope_all) "All groups (pre-score filter skipped)"
                   else if (auto_prescored) "Top pre-scored groups (auto, on the fly)"
@@ -2216,7 +2578,10 @@ server <- function(input, output, session) {
           score_method = input$score_method, model_method = m_method,
           score_args = score_args, model_args = model_args,
           top_n = input$n_top_groups, shave = isTRUE(input$shave_genes),
-          fdr_alpha = input$fdr_alpha, normalize = isTRUE(input$normalize_z),
+          fdr_alpha = input$fdr_alpha,
+          shave_method = input$shave_method %||% "fdr",
+          shave_k = input$shave_k %||% 100,
+          normalize = isTRUE(input$normalize_z),
           seed = input$score_seed
         )
         mc$n      <- input$mccv_iterations
@@ -2323,11 +2688,16 @@ server <- function(input, output, session) {
           mode = "mccv",
           modeling = sprintf("accumulative top-1..%d per fold", p$top_n %||% 10),
           ranking = "group classifier score (train-only)",
-          gene_shaving = if (isTRUE(p$shave))
-            sprintf("Welch t-test + BH FDR %.3g (mean %.0f genes/fold)",
-                    p$fdr_alpha %||% 0.05,
-                    mean(vapply(ok, function(r) r$n_shaved_genes %||% NA_real_, numeric(1)),
-                         na.rm = TRUE)) else "off",
+          gene_shaving = if (isTRUE(p$shave)) {
+            mean_shaved <- mean(vapply(ok, function(r) r$n_shaved_genes %||% NA_real_,
+                                       numeric(1)), na.rm = TRUE)
+            if (identical(p$shave_method, "topk"))
+              sprintf("Welch t-test, top-%d genes/fold (mean %.0f kept)",
+                      p$shave_k %||% 100L, mean_shaved)
+            else
+              sprintf("Welch t-test + BH FDR %.3g (mean %.0f genes/fold)",
+                      p$fdr_alpha %||% 0.05, mean_shaved)
+          } else "off",
           best_k = best_k_mode,
           dataset_name = rv$dataset_name %||% "dataset",
           scope = if (isTRUE(mc$scope_all)) "All groups (pre-score keeps 100%/fold)"
@@ -2384,7 +2754,9 @@ server <- function(input, output, session) {
                 score_method = p$score_method, model_method = p$model_method,
                 score_args = p$score_args, model_args = p$model_args,
                 top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
-                fdr_alpha = p$fdr_alpha %||% 0.05, normalize = p$normalize %||% FALSE,
+                fdr_alpha = p$fdr_alpha %||% 0.05,
+                shave_method = p$shave_method %||% "fdr", shave_k = p$shave_k %||% 100,
+                normalize = p$normalize %||% FALSE,
                 seed = p$seed),
               error = function(e) list(fold = idx, status = "error",
                                        error_message = conditionMessage(e))),
@@ -2407,7 +2779,9 @@ server <- function(input, output, session) {
             score_method = p$score_method, model_method = p$model_method,
             score_args = p$score_args, model_args = p$model_args,
             top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
-            fdr_alpha = p$fdr_alpha %||% 0.05, normalize = p$normalize %||% FALSE,
+            fdr_alpha = p$fdr_alpha %||% 0.05,
+            shave_method = p$shave_method %||% "fdr", shave_k = p$shave_k %||% 100,
+            normalize = p$normalize %||% FALSE,
             seed = p$seed),
           error = function(e) list(fold = idx, status = "error",
                                    error_message = conditionMessage(e)))
@@ -2425,6 +2799,32 @@ server <- function(input, output, session) {
     }
     # Poll briskly while work is in flight so the live panel stays smooth.
     if (isTRUE(mc$active)) invalidateLater(200)
+  })
+
+  # ── Stop a running MCCV: kill in-flight forks, clear the queue, finish. ────
+  observeEvent(input$btn_stop_score, {
+    if (!isTRUE(mc$active)) return()
+    # Terminate the forked fold workers still running on their cores.
+    for (job in mc$running) {
+      pid <- tryCatch(job$pid, error = function(e) NULL)
+      if (!is.null(pid))
+        tryCatch(tools::pskill(pid, tools::SIGKILL), error = function(e) NULL)
+    }
+    # Reap any now-dead workers so no zombies linger.
+    if (length(mc$running) > 0)
+      tryCatch(parallel::mccollect(mc$running, wait = FALSE), error = function(e) NULL)
+
+    n_done <- mc$done
+    mc$running     <- list()
+    mc$queue       <- integer(0)
+    mc$active      <- FALSE
+    mc$summary_open <- FALSE     # no completion banner for a cancelled run
+    rv$scored      <- FALSE
+    session$sendCustomMessage("enableBtn", "btn_score")
+    showNotification(
+      sprintf("⏹️ MCCV stopped by user after %d/%d fold(s). No results saved.",
+              n_done, mc$n %||% 0L),
+      type = "warning", duration = 8)
   })
 
   # Helper: accuracy vector from completed folds (in fold order).
@@ -2573,6 +2973,49 @@ server <- function(input, output, session) {
         tags$span(class = "text-muted", gsub("_", " ", nm)),
         tags$b(sprintf("%.3f", means[[nm]])))
     }))
+  })
+
+  # ── Run configuration panel: exactly what this run used, with numbers ─────
+  output$gsm_run_config <- renderUI({
+    cfg <- rv$run_config
+    if (is.null(cfg)) return(NULL)
+    kv_rows <- function(lst) tagList(lapply(names(lst), function(k)
+      tags$div(style = "display:flex; justify-content:space-between; gap:12px; padding:3px 0; border-bottom:1px solid rgba(255,255,255,0.05);",
+        tags$span(class = "text-muted", style = "white-space:nowrap;", k),
+        tags$b(style = "text-align:right;", as.character(lst[[k]])))))
+    section <- function(icon, title, lst) tags$div(
+      style = "flex:1 1 220px; min-width:220px;",
+      tags$div(style = "font-weight:700; margin-bottom:4px;", paste(icon, title)),
+      kv_rows(lst))
+    tags$div(class = "card", style = "margin-bottom:12px; padding:12px 14px; background:rgba(74,144,217,0.06); border-left:4px solid #4a90d9;",
+      tags$div(style = "display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;",
+        tags$div(style = "font-weight:700; font-size:1.02rem;", "\U0001F9FE This run — selected configuration"),
+        tags$span(class = "text-muted", style = "font-size:0.82rem;", cfg$dataset)),
+      tags$div(style = "display:flex; flex-wrap:wrap; gap:24px;",
+        section("\U0001F9E9", "Grouping (G)", cfg$grouping),
+        section("\U2702\UFE0F", "Gene shaving", cfg$shaving),
+        section("\U0001F3AF", "Scoring / Modeling", cfg$scoring)))
+  })
+
+  # ── Groups created in the most recent completed fold (live during MCCV) ───
+  output$gsm_live_groups <- renderDT({
+    mc$tick
+    ok <- Filter(function(r) !is.null(r) && identical(r$status, "success"),
+                 isolate(mc$folds))
+    validate(need(length(ok) > 0, "Groups will appear here as folds complete…"))
+    f  <- ok[[length(ok)]]                      # most recent successful fold
+    gs <- f$group_sizes %||% integer(0)
+    acc <- f$group_accuracies %||% numeric(0)
+    nm <- f$ranked_groups %||% names(gs)
+    nm <- nm[nm %in% names(gs)]
+    validate(need(length(nm) > 0, "No groups recorded for this fold."))
+    df <- data.frame(
+      Rank       = seq_along(nm),
+      Group      = nm,
+      Genes      = as.integer(gs[nm]),
+      TrainScore = round(as.numeric(acc[nm]), 4),
+      stringsAsFactors = FALSE)
+    .dt(df, page = 10)
   })
 
   output$mccv_live_table <- renderTable({
@@ -3024,7 +3467,11 @@ server <- function(input, output, session) {
 
   output$rra_group_table <- renderDT({
     tb <- gsmR:::gsm_tbl_group_rra(.mccv_folds())
-    validate(need(!is.null(tb), "Run Parallel MCCV (≥ 2 iterations) to compute RRA over groups."))
+    validate(need(!is.null(tb),
+      if (identical(rv$dataset$params$grouping_method, "bridge"))
+        "BRIDGE re-derives groups each fold, so group names are fold-local — see the gene-level consensus (RRA over genes) below."
+      else
+        "Run Parallel MCCV (≥ 2 iterations) to compute RRA over groups."))
     .dt(tb)
   })
   output$rra_feature_table <- renderDT({
@@ -3201,7 +3648,21 @@ server <- function(input, output, session) {
       settings <- gsmR::read_settings(input$import_settings$datapath)
       
       # Update UI inputs based on parsed YAML
+      if (!is.null(settings$grouping_method)) updateSelectInput(session, "grouping_method", selected = settings$grouping_method)
       if (!is.null(settings$groups_format)) updateSelectInput(session, "groups_format", selected = settings$groups_format)
+      # BRIDGE hyperparameters
+      if (!is.null(settings$bridge_prior_source)) updateSelectInput(session, "bridge_prior_source", selected = settings$bridge_prior_source)
+      if (!is.null(settings$bridge_data_type)) updateSelectInput(session, "bridge_data_type", selected = settings$bridge_data_type)
+      if (!is.null(settings$bridge_lambda)) updateNumericInput(session, "bridge_lambda", value = as.numeric(settings$bridge_lambda))
+      if (!is.null(settings$bridge_beta)) updateNumericInput(session, "bridge_beta", value = as.numeric(settings$bridge_beta))
+      if (!is.null(settings$bridge_lambda2)) updateNumericInput(session, "bridge_lambda2", value = as.numeric(settings$bridge_lambda2))
+      if (!is.null(settings$bridge_lambda1)) updateNumericInput(session, "bridge_lambda1", value = as.numeric(settings$bridge_lambda1))
+      if (!is.null(settings$bridge_resolution)) updateTextInput(session, "bridge_resolution", value = settings$bridge_resolution)
+      if (!is.null(settings$bridge_tau)) updateSliderInput(session, "bridge_tau", value = as.numeric(settings$bridge_tau))
+      if (!is.null(settings$bridge_prefilter)) updateSelectInput(session, "bridge_prefilter", selected = settings$bridge_prefilter)
+      if (!is.null(settings$bridge_precision)) updateSelectInput(session, "bridge_precision", selected = settings$bridge_precision)
+      if (!is.null(settings$bridge_max_genes)) updateNumericInput(session, "bridge_max_genes", value = as.numeric(settings$bridge_max_genes))
+      if (!is.null(settings$bridge_preview)) updateCheckboxInput(session, "bridge_preview", value = as.logical(settings$bridge_preview))
       if (!is.null(settings$min_group_size)) updateNumericInput(session, "min_group_size", value = as.numeric(settings$min_group_size))
       if (!is.null(settings$max_group_size)) updateNumericInput(session, "max_group_size", value = as.numeric(settings$max_group_size))
       
@@ -3225,6 +3686,8 @@ server <- function(input, output, session) {
       if (!is.null(settings$knn_k)) updateNumericInput(session, "knn_k", value = as.numeric(settings$knn_k))
       
       if (!is.null(settings$shave_genes)) updateCheckboxInput(session, "shave_genes", value = as.logical(settings$shave_genes))
+      if (!is.null(settings$shave_method)) updateSelectInput(session, "shave_method", selected = settings$shave_method)
+      if (!is.null(settings$shave_k)) updateNumericInput(session, "shave_k", value = as.numeric(settings$shave_k))
       if (!is.null(settings$fdr_alpha)) updateNumericInput(session, "fdr_alpha", value = as.numeric(settings$fdr_alpha))
       if (!is.null(settings$normalize_z)) updateCheckboxInput(session, "normalize_z", value = as.logical(settings$normalize_z))
       
@@ -3264,7 +3727,20 @@ server <- function(input, output, session) {
         current_values <- list(
           expression_file = rv$expr_file_path %||% "",
           groups_file = rv$groups_file_path %||% "",
+          grouping_method = input$grouping_method,
           groups_format = input$groups_format,
+          bridge_prior_source = input$bridge_prior_source,
+          bridge_data_type = input$bridge_data_type,
+          bridge_lambda = input$bridge_lambda,
+          bridge_beta = input$bridge_beta,
+          bridge_lambda2 = input$bridge_lambda2,
+          bridge_lambda1 = input$bridge_lambda1,
+          bridge_resolution = input$bridge_resolution,
+          bridge_tau = input$bridge_tau,
+          bridge_prefilter = input$bridge_prefilter,
+          bridge_precision = input$bridge_precision,
+          bridge_max_genes = input$bridge_max_genes,
+          bridge_preview = input$bridge_preview,
           min_group_size = input$min_group_size,
           max_group_size = input$max_group_size,
           collapse_method = input$collapse_method,
@@ -3283,6 +3759,8 @@ server <- function(input, output, session) {
           svm_gamma = input$svm_gamma,
           knn_k = input$knn_k,
           shave_genes = input$shave_genes,
+          shave_method = input$shave_method,
+          shave_k = input$shave_k,
           fdr_alpha = input$fdr_alpha,
           normalize_z = input$normalize_z,
           score_scope = input$score_scope,

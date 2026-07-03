@@ -60,6 +60,7 @@ gsm_tbl_iteration_metrics <- function(folds) {
     data.frame(
       Iteration    = f$fold,
       Status       = f$status %|null|% "error",
+      Genes_shaved = if (ok) f$n_shaved_genes %|null|% NA_integer_ else NA_integer_,
       Best_k       = if (ok) f$best_k %|null|% NA_integer_ else NA_integer_,
       Accuracy     = getm(m, "Accuracy"),
       Sensitivity  = getm(m, "Sensitivity"),
