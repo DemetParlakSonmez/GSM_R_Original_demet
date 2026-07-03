@@ -4,7 +4,14 @@
 \alias{gsm_dataset}
 \title{Construct a GSM dataset}
 \usage{
-gsm_dataset(expr, labels, groups, min_group_size = 5, max_group_size = 500)
+gsm_dataset(
+  expr,
+  labels,
+  groups,
+  min_group_size = 5,
+  max_group_size = 500,
+  grouping_spec = NULL
+)
 }
 \arguments{
 \item{expr}{Numeric matrix with genes as rows and samples as columns.}
@@ -18,6 +25,15 @@ Groups below this threshold are dropped. Default \code{5}.}
 
 \item{max_group_size}{Maximum number of genes in a group. Groups above this
 threshold are dropped. Default \code{500}.}
+
+\item{grouping_spec}{Optional recipe describing how to (re)derive groups from
+data, used by data-driven methods such as BRIDGE so that grouping can be
+recomputed \strong{on the training samples of each cross-validation fold}
+(leakage-free). A named list with components \code{method} (e.g. \code{"bridge"}),
+\code{prior} (a label-free prior graph, built once and reused every fold),
+\code{args} (hyperparameters forwarded to the grouping function), and optional
+\code{prefilter} / \code{precision_method}. \code{NULL} (default) means the \code{groups}
+passed in are fixed (the file-based behavior); folds use them as-is.}
 }
 \value{
 An S3 object of class \code{gsm_dataset}.

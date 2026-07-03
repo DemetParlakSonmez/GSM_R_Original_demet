@@ -15,18 +15,34 @@ NULL
 #' @param expr Numeric matrix (genes x samples).
 #' @param labels Factor of class labels (exactly two levels used).
 #' @param train_idx Integer vector of training sample indices.
-#' @param alpha BH-FDR threshold (default `0.05`).
+#' @param alpha BH-FDR threshold (default `0.05`). Used when `method = "fdr"`.
+#' @param method Selection rule for surviving genes:
+#'   * `"fdr"` (default) — keep genes with BH-adjusted p-value below `alpha`.
+#'     The number of survivors varies from fold to fold with the data.
+#'   * `"topk"` — keep the `top_k` genes with the strongest evidence (smallest
+#'     raw p-value, ties broken by larger `|t|`), giving a **fixed** count per
+#'     fold regardless of significance.
+#' @param top_k Number of genes to keep when `method = "topk"`. Default `100`.
 #' @return Character vector of surviving gene names. If fewer than two genes
-#'   pass (or a class has <2 training samples), falls back to returning all
-#'   genes so the pipeline can continue.
+#'   pass FDR (or a class has <2 training samples / data is not two-class), the
+#'   function falls back to returning all genes so the pipeline can continue.
 #' @export
-shave_genes <- function(expr, labels, train_idx, alpha = 0.05) {
+shave_genes <- function(expr, labels, train_idx, alpha = 0.05,
+                        method = c("fdr", "topk"), top_k = 100) {
+  method <- match.arg(method)
   genes <- rownames(expr)
   wt <- welch_t_vector(expr, labels, train_idx)
   if (is.null(wt)) return(genes)                 # not two-class / too few samples
 
   p <- 2 * stats::pt(-abs(wt$t), df = wt$df)
   p[!is.finite(wt$t) | !is.finite(wt$df)] <- 1   # constant genes -> not significant
+
+  if (method == "topk") {
+    k <- max(1L, min(as.integer(top_k), length(genes)))
+    ord <- order(p, -abs(wt$t))                  # smallest p first, |t| tie-break
+    return(genes[ord[seq_len(k)]])
+  }
+
   p_adj <- stats::p.adjust(p, method = "BH")
   keep <- genes[is.finite(p_adj) & p_adj < alpha]
   if (length(keep) < 2) genes else keep          # safe fallback

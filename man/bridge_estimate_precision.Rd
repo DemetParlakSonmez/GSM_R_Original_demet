@@ -11,7 +11,8 @@ bridge_estimate_precision(
   lambda = 0.1,
   beta = 0.5,
   lambda2 = 0.05,
-  data_type = "gaussian"
+  data_type = "gaussian",
+  precision_method = "glasso"
 )
 }
 \arguments{
@@ -30,6 +31,11 @@ values in \verb{[0, 1]}. May be \code{NULL} for \code{B = 0}.}
 \item{lambda2}{Fused penalty coupling the two networks (JGL backend only).}
 
 \item{data_type}{One of \code{"gaussian"}, \code{"nonparanormal"}, \code{"compositional"}.}
+
+\item{precision_method}{Estimation backend preference: \code{"glasso"} (default;
+full graphical lasso, \code{O(p^3)}, uses the JGL fused backend when available)
+or \code{"mb"} (Meinshausen-Buhlmann neighborhood selection via \code{huge},
+\code{~O(p^2)}, much faster for large \code{p}).}
 }
 \value{
 A list with \code{Theta0}, \code{Theta1} (dense numeric precision matrices) and

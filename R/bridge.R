@@ -134,6 +134,62 @@ bridge_prior_from_edgelist <- function(x, features) {
   methods::as(B, "symmetricMatrix")
 }
 
+# ── Label-blind pre-filter (speed; no leakage) ───────────────────────────────
+
+#' Reduce the feature set before BRIDGE estimation, without looking at labels
+#'
+#' The class-conditional graphical lasso scales ~cubically in the number of
+#' features, so on transcriptome-scale data BRIDGE must run on a reduced gene
+#' set. This filter is deliberately **label-blind** — it never inspects `y` — so
+#' it can be applied once, globally, before cross-validation without leaking any
+#' class information into the folds. Two complementary strategies:
+#'
+#' * `"variance"` keeps the `max_genes` most variable features (by variance).
+#' * `"prior"` keeps only features that appear in the prior graph `B` (genes
+#'   known to be biologically related), which is the most principled restriction
+#'   for a knowledge-regularized method.
+#'
+#' `"prior"` and `"variance"` compose: with a prior supplied and `max_genes`
+#' set, the prior restriction is applied first, then the variance cap.
+#'
+#' @param X Numeric expression matrix (genes x samples); row names required.
+#' @param method One of `"none"`, `"variance"`, `"prior"`. Default `"none"`.
+#' @param max_genes Optional integer cap on the number of features to keep
+#'   (applied by the variance strategy). `NULL` = no cap.
+#' @param B Optional prior over the features (named grouping list, edge list, or
+#'   symmetric matrix) used by the `"prior"` strategy.
+#' @return A character vector of the retained feature (row) names.
+#' @export
+bridge_prefilter <- function(X, method = c("none", "variance", "prior"),
+                             max_genes = NULL, B = NULL) {
+  method <- match.arg(method)
+  stopifnot(is.matrix(X), !is.null(rownames(X)))
+  feats <- rownames(X)
+
+  if (method == "prior") {
+    if (is.null(B)) {
+      warning("bridge_prefilter(method = \"prior\") needs a prior B; ",
+              "keeping all features.", call. = FALSE)
+    } else {
+      Bmat <- bridge_resolve_prior(B, feats, verbose = FALSE)
+      if (!is.null(Bmat)) {
+        deg <- Matrix::rowSums(Bmat != 0)
+        keep <- feats[deg > 0]
+        if (length(keep) >= 2) feats <- keep
+      }
+    }
+  }
+
+  if (method == "variance" || (!is.null(max_genes) && length(feats) > max_genes)) {
+    v <- apply(X[feats, , drop = FALSE], 1, stats::var)
+    ord <- feats[order(v, decreasing = TRUE)]
+    cap <- if (is.null(max_genes)) length(ord) else min(max_genes, length(ord))
+    feats <- ord[seq_len(cap)]
+  }
+
+  feats
+}
+
 # ── Class-conditional dependency estimation ──────────────────────────────────
 
 #' Estimate two class-conditional sparse precision matrices
@@ -155,14 +211,20 @@ bridge_prior_from_edgelist <- function(x, features) {
 #' @param beta Knowledge-weighting strength in `[0, 1)`.
 #' @param lambda2 Fused penalty coupling the two networks (JGL backend only).
 #' @param data_type One of `"gaussian"`, `"nonparanormal"`, `"compositional"`.
+#' @param precision_method Estimation backend preference: `"glasso"` (default;
+#'   full graphical lasso, `O(p^3)`, uses the JGL fused backend when available)
+#'   or `"mb"` (Meinshausen-Buhlmann neighborhood selection via `huge`,
+#'   `~O(p^2)`, much faster for large `p`).
 #' @return A list with `Theta0`, `Theta1` (dense numeric precision matrices) and
 #'   the `backend` used.
 #' @keywords internal
 bridge_estimate_precision <- function(X0, X1, B, lambda = 0.1, beta = 0.5,
                                       lambda2 = 0.05,
-                                      data_type = "gaussian") {
+                                      data_type = "gaussian",
+                                      precision_method = "glasso") {
   data_type <- match.arg(data_type,
                          c("gaussian", "nonparanormal", "compositional"))
+  precision_method <- match.arg(precision_method, c("glasso", "mb"))
   if (data_type == "compositional") {
     stop("data_type = \"compositional\" is not yet supported. It needs a CLR + ",
          "SPIEC-EASI estimator (the 'SpiecEasi' package, currently GitHub-only: ",
@@ -185,6 +247,28 @@ bridge_estimate_precision <- function(X0, X1, B, lambda = 0.1, beta = 0.5,
   # Per-edge penalty weights: biologically related edges penalized less.
   Wpen <- lambda * (1 - beta * Bm)
   Wpen[Wpen < 0] <- 0
+
+  # Fast backend: Meinshausen-Buhlmann neighborhood selection (O(p^2)), per
+  # class, for large p. Knowledge weighting enters via the base penalty lambda;
+  # the fused term is not available here (independent per-class estimation).
+  if (precision_method == "mb") {
+    if (!requireNamespace("huge", quietly = TRUE)) {
+      stop("precision_method = \"mb\" needs the 'huge' package. Install it ",
+           "with install.packages(\"huge\").", call. = FALSE)
+    }
+    est_mb <- function(Xc) {
+      fit <- huge::huge(as.matrix(Xc), lambda = lambda, method = "mb",
+                        verbose = FALSE)
+      # huge returns a path; with a single lambda take the first (only) icov/path.
+      P <- fit$path[[1]]
+      Theta <- as.matrix(P) * 1.0
+      Theta <- (Theta + t(Theta)) / 2          # symmetrize the adjacency
+      diag(Theta) <- 1
+      dimnames(Theta) <- list(colnames(Xc), colnames(Xc))
+      Theta
+    }
+    return(list(Theta0 = est_mb(X0), Theta1 = est_mb(X1), backend = "huge-mb"))
+  }
 
   # Preferred backend: JGL (joint, with fused penalty). Requires equal columns.
   if (requireNamespace("JGL", quietly = TRUE)) {
@@ -395,6 +479,14 @@ bridge_score_modules <- function(modules, X_gs, y, B, lambda1 = 0.25,
 #' @param data_type One of `"gaussian"` (default), `"nonparanormal"`
 #'   (applies [huge::huge.npn()] first), or `"compositional"` (not yet
 #'   supported; errors with guidance to install SpiecEasi).
+#' @param precision_method Estimation backend: `"glasso"` (default) or `"mb"`
+#'   (faster neighborhood selection for large `p`). See
+#'   [bridge_estimate_precision()].
+#' @param prefilter Label-blind feature pre-filter applied first: `"none"`
+#'   (default), `"variance"`, or `"prior"`. See [bridge_prefilter()]. This never
+#'   inspects `y`, so it is safe to apply outside cross-validation.
+#' @param max_genes Optional cap on the number of features kept by the variance
+#'   pre-filter. `NULL` (default) = no cap.
 #' @param harden If `TRUE` (default) return crisp groups (a plain named list of
 #'   gene vectors) so the existing Scoring step works unchanged. Soft membership
 #'   is not produced in this release; the argument is kept so that a future
@@ -434,9 +526,14 @@ bridge_grouping <- function(X, y, B = NULL,
                             tau = 0.6,
                             data_type = c("gaussian", "nonparanormal",
                                           "compositional"),
+                            precision_method = c("glasso", "mb"),
+                            prefilter = c("none", "variance", "prior"),
+                            max_genes = NULL,
                             harden = TRUE, min_size = 5, max_size = 500,
                             seed = 1, verbose = TRUE) {
   data_type <- match.arg(data_type)
+  precision_method <- match.arg(precision_method)
+  prefilter <- match.arg(prefilter)
   if (!is.null(seed)) set.seed(seed)
 
   # ── Validate X / y ─────────────────────────────────────────────────────────
@@ -455,6 +552,15 @@ bridge_grouping <- function(X, y, B = NULL,
     stop("BRIDGE currently supports exactly two classes; found ", nlevels(y),
          ".", call. = FALSE)
   }
+  # ── Label-blind pre-filter (speed; never inspects y) ───────────────────────
+  if (prefilter != "none" || !is.null(max_genes)) {
+    kept <- bridge_prefilter(X, method = prefilter, max_genes = max_genes, B = B)
+    if (verbose && length(kept) < nrow(X)) {
+      message("BRIDGE: pre-filter kept ", length(kept), "/", nrow(X),
+              " features (label-blind).")
+    }
+    X <- X[kept, , drop = FALSE]
+  }
   feats <- rownames(X)
 
   # ── Resolve the prior B into a matrix aligned to feats ─────────────────────
@@ -472,7 +578,8 @@ bridge_grouping <- function(X, y, B = NULL,
   if (verbose) message("BRIDGE: estimating class-conditional networks over ",
                        length(active), " features...")
   est <- bridge_estimate_precision(X0, X1, Ba, lambda = lambda, beta = beta,
-                                   lambda2 = lambda2, data_type = data_type)
+                                   lambda2 = lambda2, data_type = data_type,
+                                   precision_method = precision_method)
   # Ensure dimnames are the active features.
   dimnames(est$Theta0) <- list(active, active)
   dimnames(est$Theta1) <- list(active, active)

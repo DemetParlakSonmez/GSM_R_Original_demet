@@ -17,6 +17,8 @@ run_mccv(
   top_n = 10,
   shave = TRUE,
   fdr_alpha = 0.05,
+  shave_method = "fdr",
+  shave_k = 100,
   normalize = FALSE,
   cores = NULL,
   seed = 44,
@@ -45,6 +47,16 @@ run_mccv(
 \item{top_n}{Integer. Number of accumulative top-k levels to evaluate per fold
 (the model is built on top-1, top-1..2, ..., top-1..\code{top_n} ranked groups).
 Default \code{10}.}
+
+\item{shave}{Logical. Whether to apply training-only gene shaving. Default \code{TRUE}.}
+
+\item{fdr_alpha}{BH-FDR threshold for shaving when \code{shave_method = "fdr"}.}
+
+\item{shave_method}{Gene-shaving selection rule, \code{"fdr"} (default) or \code{"topk"}.
+See \code{\link[=shave_genes]{shave_genes()}}.}
+
+\item{shave_k}{Number of top genes to keep when \code{shave_method = "topk"}.
+Default \code{100}.}
 
 \item{cores}{Integer. Number of CPU cores to use. Default is all minus one.}
 

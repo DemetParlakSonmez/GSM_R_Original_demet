@@ -15,6 +15,9 @@ bridge_grouping(
   resolution = c(0.5, 1, 1.5, 2),
   tau = 0.6,
   data_type = c("gaussian", "nonparanormal", "compositional"),
+  precision_method = c("glasso", "mb"),
+  prefilter = c("none", "variance", "prior"),
+  max_genes = NULL,
   harden = TRUE,
   min_size = 5,
   max_size = 500,
@@ -56,6 +59,17 @@ Default \code{0.6}.}
 \item{data_type}{One of \code{"gaussian"} (default), \code{"nonparanormal"}
 (applies \code{\link[huge:huge.npn]{huge::huge.npn()}} first), or \code{"compositional"} (not yet
 supported; errors with guidance to install SpiecEasi).}
+
+\item{precision_method}{Estimation backend: \code{"glasso"} (default) or \code{"mb"}
+(faster neighborhood selection for large \code{p}). See
+\code{\link[=bridge_estimate_precision]{bridge_estimate_precision()}}.}
+
+\item{prefilter}{Label-blind feature pre-filter applied first: \code{"none"}
+(default), \code{"variance"}, or \code{"prior"}. See \code{\link[=bridge_prefilter]{bridge_prefilter()}}. This never
+inspects \code{y}, so it is safe to apply outside cross-validation.}
+
+\item{max_genes}{Optional cap on the number of features kept by the variance
+pre-filter. \code{NULL} (default) = no cap.}
 
 \item{harden}{If \code{TRUE} (default) return crisp groups (a plain named list of
 gene vectors) so the existing Scoring step works unchanged. Soft membership

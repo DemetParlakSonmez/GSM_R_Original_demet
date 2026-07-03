@@ -24,6 +24,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
                           score_method = "rf", model_method = "rf",
                           score_args = list(), model_args = list(),
                           top_n = 10, shave = TRUE, fdr_alpha = 0.05,
+                          shave_method = "fdr", shave_k = 100,
                           normalize = FALSE, seed = 42) {
   fold_seed <- seed + fold
   tryCatch({
@@ -33,13 +34,27 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     expr_use <- if (isTRUE(normalize))
       zscore_fit_apply(dataset$expr, split$train) else dataset$expr
 
-    # Phase I — training-only gene shaving (Welch t-test + BH FDR), then group.
+    # Leakage-free grouping: for data-driven methods (BRIDGE) the groups are
+    # RE-DERIVED from this fold's TRAINING samples only; for fixed/file-based
+    # grouping this returns dataset$groups unchanged. `ds` is used everywhere
+    # downstream so the rest of the fold is agnostic to how groups were made.
+    ds <- dataset
+    if (!is.null(dataset$grouping_spec) &&
+        identical(dataset$grouping_spec$method, "bridge")) {
+      ds$groups <- grouping_for_fold(dataset, split$train, expr = expr_use,
+                                     fold_seed = fold_seed)
+      if (length(ds$groups) == 0)
+        stop("BRIDGE derived no groups on this fold's training data.")
+    }
+
+    # Phase I — training-only gene shaving (Welch t-test; FDR or top-k), group.
     keep_genes <- if (isTRUE(shave))
-      shave_genes(expr_use, dataset$labels, split$train, alpha = fdr_alpha)
+      shave_genes(expr_use, ds$labels, split$train, alpha = fdr_alpha,
+                  method = shave_method, top_k = shave_k)
     else rownames(expr_use)
 
     # Candidate groups: optional ANOVA group pre-filter, then shave their genes.
-    candidates <- pre_score_groups(dataset, split$train,
+    candidates <- pre_score_groups(ds, split$train,
                                    method = pre_score_method,
                                    top_percent = pre_score_top_percent)
     pre_sc <- attr(candidates, "scores")
@@ -50,7 +65,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     # Phase II — SCORE each candidate (mean F1, k-fold CV, TRAIN only) -> rank.
     scores <- vapply(names(candidates), function(name) {
       do.call(score_group_train, c(
-        list(expr = expr_use, labels = dataset$labels,
+        list(expr = expr_use, labels = ds$labels,
              genes = candidates[[name]], train_idx = split$train,
              method = score_method),
         score_args))
@@ -66,7 +81,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
       if (n_feat == prev_features) next            # expand: no new features at this k
       prev_features <- n_feat
       m <- do.call(build_model, c(
-        list(expr = expr_use, labels = dataset$labels, top_groups = sub,
+        list(expr = expr_use, labels = ds$labels, top_groups = sub,
              train_idx = split$train, method = model_method),
         model_args))
       acc_rows[[length(acc_rows) + 1L]] <- data.frame(
@@ -87,6 +102,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     list(
       fold = fold,
       status = "success",
+      grouping_method = ds$params$grouping_method %||% "file",
       metrics = best_model$metrics,               # performance at the best k (by F1)
       best_k = best_k,
       features_count = length(best_model$features),
@@ -95,13 +111,14 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
       accumulative = accumulative,                 # top-1..K performance curve
       ranked_groups = ranked,
       group_accuracies = scores,                   # train-only mean-F1 ranking scores
+      group_sizes = vapply(candidates, length, integer(1)),  # genes/group this fold
       pre_scores = pre_sc,                         # sorted ANOVA scores (all groups)
       importance = best_model$importance,          # per-gene RF importance @ best k
       # Signed training Welch-t over the group-gene universe, for G-S-M detect
       # (de novo module discovery); classifier-independent, no leakage.
       gene_stats = gene_signed_stats(
-        expr_use, dataset$labels, split$train,
-        universe = intersect(unique(unlist(dataset$groups)), keep_genes))
+        expr_use, ds$labels, split$train,
+        universe = intersect(unique(unlist(ds$groups)), keep_genes))
     )
   }, error = function(e) {
     list(fold = fold, status = "error", error_message = conditionMessage(e))
@@ -126,6 +143,12 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
 #' @param top_n Integer. Number of accumulative top-k levels to evaluate per fold
 #'   (the model is built on top-1, top-1..2, ..., top-1..`top_n` ranked groups).
 #'   Default `10`.
+#' @param shave Logical. Whether to apply training-only gene shaving. Default `TRUE`.
+#' @param fdr_alpha BH-FDR threshold for shaving when `shave_method = "fdr"`.
+#' @param shave_method Gene-shaving selection rule, `"fdr"` (default) or `"topk"`.
+#'   See [shave_genes()].
+#' @param shave_k Number of top genes to keep when `shave_method = "topk"`.
+#'   Default `100`.
 #' @param cores Integer. Number of CPU cores to use. Default is all minus one.
 #' @param seed Integer. Base random seed for reproducibility. Default `42`.
 #' @param ... Additional arguments passed to model/scoring functions.
@@ -136,6 +159,7 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
                      score_method = "rf", model_method = "rf",
                      score_args = list(), model_args = list(),
                      top_n = 10, shave = TRUE, fdr_alpha = 0.05,
+                     shave_method = "fdr", shave_k = 100,
                      normalize = FALSE, cores = NULL, seed = 44, ...) {
   stopifnot(inherits(dataset, "gsm_dataset"))
   stopifnot(is.numeric(n_iterations) && n_iterations > 0)
@@ -158,6 +182,7 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
                   score_method = score_method, model_method = model_method,
                   score_args = score_args, model_args = model_args,
                   top_n = top_n, shave = shave, fdr_alpha = fdr_alpha,
+                  shave_method = shave_method, shave_k = shave_k,
                   normalize = normalize, seed = seed)
   }
 
@@ -176,10 +201,11 @@ run_mccv <- function(dataset, n_iterations = 10, train_ratio = 0.7,
       library(randomForest)
       library(e1071)
     })
-    parallel::clusterExport(cl, c("dataset", "train_ratio", "pre_score_method", 
-                                  "pre_score_top_percent", "score_method", 
-                                  "model_method", "seed", "score_args", 
-                                  "model_args"), envir = environment())
+    parallel::clusterExport(cl, c("dataset", "train_ratio", "pre_score_method",
+                                  "pre_score_top_percent", "score_method",
+                                  "model_method", "seed", "score_args",
+                                  "model_args", "shave_method", "shave_k"),
+                            envir = environment())
     
     results <- parallel::parLapply(cl, seq_len(n_iterations), run_fold)
   } else {

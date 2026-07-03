@@ -63,6 +63,11 @@ rra_aggregate <- function(rank_lists) {
 #' @keywords internal
 gsm_tbl_group_rra <- function(folds) {
   ok <- .ok_folds_rra(folds)
+  # Data-driven groupings (e.g. BRIDGE) re-derive groups per fold, so group
+  # NAMES are fold-local and not comparable across folds — a group-name RRA is
+  # meaningless. Report gene-level consensus (gsm_tbl_feature_rra) instead.
+  methods <- vapply(ok, function(f) f$grouping_method %||% "file", character(1))
+  if (length(methods) && any(methods == "bridge")) return(NULL)
   lists <- Filter(Negate(is.null), lapply(ok, `[[`, "ranked_groups"))
   res <- rra_aggregate(lists)
   if (is.null(res)) return(NULL)

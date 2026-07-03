@@ -91,6 +91,47 @@ compute_grouping <- function(method = c("file", "bridge"),
   do.call(bridge_grouping, c(list(X = X, y = y, B = B), bridge_args))
 }
 
+#' Derive the groups to use for one cross-validation fold
+#'
+#' The leakage-free entry point for cross-validation. For a fixed (file-based)
+#' grouping it simply returns the dataset's pre-computed groups. For a
+#' data-driven grouping carrying a `grouping_spec` (e.g. BRIDGE), it
+#' **recomputes the groups from the training samples only**, so the class labels
+#' are never seen for the held-out test samples of the fold.
+#'
+#' @param dataset A `gsm_dataset`. If `dataset$grouping_spec` is `NULL` or its
+#'   method is not data-driven, `dataset$groups` is returned unchanged.
+#' @param train_idx Integer vector of training-sample column indices for this
+#'   fold. Only these columns of the expression matrix are used to derive groups.
+#' @param expr Optional expression matrix to use instead of `dataset$expr`
+#'   (e.g. a leakage-free train-fitted z-scored matrix). Defaults to
+#'   `dataset$expr`.
+#' @param fold_seed Optional integer seed so groups are reproducible per fold and
+#'   vary across folds. Defaults to the spec's seed (or `1`).
+#' @return A named list of character vectors (`group name -> gene symbols`).
+#' @export
+grouping_for_fold <- function(dataset, train_idx, expr = NULL, fold_seed = NULL) {
+  spec <- dataset$grouping_spec
+  if (is.null(spec) || is.null(spec$method) || spec$method != "bridge") {
+    return(dataset$groups)  # fixed / file-based grouping: unchanged
+  }
+  X <- if (is.null(expr)) dataset$expr else expr
+  Xtr <- X[, train_idx, drop = FALSE]
+  ytr <- dataset$labels[train_idx]
+
+  args <- spec$args %||% list()
+  args$X <- Xtr
+  args$y <- ytr
+  args$B <- spec$prior
+  if (!is.null(spec$prefilter))        args$prefilter        <- spec$prefilter
+  if (!is.null(spec$precision_method)) args$precision_method <- spec$precision_method
+  if (!is.null(spec$max_genes))        args$max_genes        <- spec$max_genes
+  if (!is.null(fold_seed))             args$seed             <- fold_seed
+  if (is.null(args$verbose))           args$verbose          <- FALSE
+
+  do.call(bridge_grouping, args)
+}
+
 #' Read a BRIDGE prior file (edge list or 2-column grouping CSV)
 #'
 #' A 3-or-more-column file is treated as an edge list (`gene_i, gene_j, weight`)
