@@ -6,6 +6,14 @@ library(shiny)
 library(bslib)
 library(DT)
 
+# ── Fork safety: force single-threaded BLAS ──────────────────────────────────
+# The app runs heavy estimators (BRIDGE's `mb`/huge, glasso) inside forked
+# workers (mcparallel) for the Stop button and parallel MCCV. Multi-threaded
+# OpenBLAS + fork() deadlocks the child (BRIDGE "runs forever"). Setting the
+# thread env vars here — in the parent, before any fork — makes forks safe.
+Sys.setenv(OPENBLAS_NUM_THREADS = "1", OMP_NUM_THREADS = "1",
+           GOTO_NUM_THREADS = "1")
+
 # Increase maximum file upload size to 500MB
 options(shiny.maxRequestSize = 500 * 1024^2)
 
@@ -70,6 +78,36 @@ value_box_ui <- function(value, label, icon = NULL) {
 classifier_label <- function(method) {
   switch(method, rf = "Random Forest", svm = "Support Vector Machine",
          knn = "K-Nearest Neighbors", xgb = "XGBoost", method)
+}
+
+# Assemble BRIDGE hyperparameters from prefixed inputs, so the Data tab
+# (prefix "bridge") and the Grouping tab (prefix "g_bridge") build an identical
+# args list. min/max group size are passed explicitly (their input ids differ).
+build_bridge_args <- function(input, prefix, min_size, max_size) {
+  g <- function(suf, default) input[[paste0(prefix, "_", suf)]] %||% default
+  res_grid <- as.numeric(strsplit(g("resolution", "0.5,1,1.5,2"),
+                                  "[,[:space:]]+")[[1]])
+  res_grid <- res_grid[is.finite(res_grid) & res_grid > 0]
+  if (!length(res_grid)) res_grid <- c(0.5, 1, 1.5, 2)
+  mg <- suppressWarnings(as.integer(g("max_genes", NA)))
+  if (length(mg) == 0 || is.na(mg) || mg <= 0) mg <- NULL
+  list(
+    lambda = g("lambda", 0.1), beta = g("beta", 0.5),
+    lambda2 = g("lambda2", 0.05), lambda1 = g("lambda1", 0.25),
+    resolution = res_grid, tau = g("tau", 0.6),
+    data_type = g("data_type", "gaussian"),
+    precision_method = g("precision", "glasso"),
+    prefilter = g("prefilter", "none"), max_genes = mg,
+    min_size = min_size, max_size = max_size, verbose = FALSE
+  )
+}
+
+# A prominent "how to use this" info callout (for tab guidance).
+gsm_help_callout <- function(title, body) {
+  tags$div(class = "card",
+    style = "margin-bottom:12px; padding:10px 14px; background:rgba(74,144,217,0.08); border-left:4px solid #4a90d9;",
+    tags$div(style = "font-weight:700; margin-bottom:4px;", paste0("ℹ️ ", title)),
+    tags$div(class = "text-muted", style = "font-size:0.85rem; line-height:1.5;", body))
 }
 
 # Snapshot the run settings (with concrete numbers) so the GSM tab can show
@@ -709,11 +747,176 @@ ui <- page_navbar(
     )
   ),
 
-  # ── Tab 3: Pre-Scoring ──────────────────────────────────────────────────
+  # ── Tab 3: Grouping (G) — run a grouping method and inspect it ───────────
+  nav_flow_sep(),
+  nav_panel(
+    value = "grouping",
+    title = nav_step_title("3", "\U0001F9E9", "Grouping"),
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 320, open = TRUE,
+        tags$div(class = "sidebar-title", "\U0001F9E9 Grouping (G)"),
+        tags$p(class = "text-muted", style = "font-size:0.83rem;",
+               "Self-contained: choose the expression data here (or reuse what's loaded), run a grouping method, inspect it, then apply it to the pipeline."),
+
+        # ── Step A: expression data (shared with the whole pipeline) ──────
+        tags$div(class = "sidebar-title", style = "font-size:0.9rem;", "① Expression data"),
+        uiOutput("g_data_status"),
+        selectInput("g_example_expr", "Example dataset",
+                    choices = c("— none —" = "", .expr_choices)),
+        fileInput("g_expr_upload", "…or upload expression CSV",
+                  accept = c(".csv", ".tsv", ".txt")),
+        actionButton("g_load_data", "\U0001F4C2 Load data",
+                     class = "btn-outline-light btn-sm w-100"),
+        tags$hr(),
+
+        tags$div(class = "text-muted", style = "font-size:0.83rem;",
+                 "② Choose a method tab on the right, set its options, and click Run."),
+        tags$hr(),
+
+        # ── Step C: apply the grouping you ran to the pipeline ────────────
+        tags$div(class = "sidebar-title", style = "font-size:0.9rem;", "③ Use it downstream"),
+        actionButton("g_apply", "✅ Apply active tab to pipeline",
+                     class = "btn-success w-100"),
+        uiOutput("g_active_status")
+      ),
+      navset_card_tab(
+        id = "g_method_tabs",
+
+        # ── Method: From file ──────────────────────────────────────────
+        nav_panel(
+          title = "\U0001F4C1 From file", value = "g_file",
+          layout_columns(
+            col_widths = c(4, 8),
+            card(
+              card_header("Inputs"),
+              tags$p(class = "text-muted", style = "font-size:0.82rem;",
+                     "Read a predefined grouping (2-column CSV or GMT) and see how it maps onto the loaded expression matrix."),
+              fileInput("g_file_upload", "Grouping file",
+                        accept = c(".csv", ".tsv", ".gmt", ".txt")),
+              selectInput("g_file_format", "Format",
+                          choices = c("Auto-detect" = "auto",
+                                      "2-column CSV" = "csv", "GMT" = "gmt")),
+              actionButton("g_file_run", "\U0001F680 Run grouping",
+                           class = "btn-primary w-100")
+            ),
+            tags$div(
+              gsm_help_callout(
+                "How to run file grouping",
+                tagList(
+                  tags$b("1."), " In the sidebar ", tags$b("①"), ", load expression data (pick an example or upload) — or reuse what's already loaded. ",
+                  tags$b("2."), " Upload a 2-column CSV (gene, group) or GMT grouping file here. ",
+                  tags$b("3."), " Click ", tags$b("Run"), " to see the groups and how many of their genes are present in your data (coverage). ",
+                  tags$b("4."), " Click ", tags$b("Apply to pipeline"), " (sidebar ③) to use these groups in Pre-Score/GSM.")),
+              uiOutput("g_file_valueboxes"),
+              card(full_screen = TRUE, card_header("Groups"),
+                   DTOutput("g_file_groups_dt")),
+              card(full_screen = TRUE, card_header("Group-size distribution"),
+                   plotOutput("g_file_size_hist", height = "240px"))
+            )
+          )
+        ),
+
+        # ── Method: BRIDGE ─────────────────────────────────────────────
+        nav_panel(
+          title = "\U0001F309 BRIDGE", value = "g_bridge",
+          layout_columns(
+            col_widths = c(4, 8),
+            card(
+              card_header("Inputs"),
+              tags$p(class = "text-muted", style = "font-size:0.82rem;",
+                     "Data-driven grouping from expression + labels, regularized by a prior graph. This runs on ALL samples (exploratory); applied to the pipeline it is re-derived per training fold."),
+              selectInput("g_bridge_prior_source", "Prior graph source",
+                          choices = c("Example grouping file" = "example",
+                                      "Upload edge list / grouping" = "upload",
+                                      "Grouping loaded on Data tab" = "loaded",
+                                      "None (data-driven)" = "none")),
+              conditionalPanel(
+                condition = "input.g_bridge_prior_source == 'example'",
+                selectInput("g_bridge_prior_example", "Example prior",
+                            choices = .groups_choices, selected = .default_groups)
+              ),
+              conditionalPanel(
+                condition = "input.g_bridge_prior_source == 'upload'",
+                fileInput("g_bridge_prior_file", "Prior file",
+                          accept = c(".csv", ".tsv", ".gmt", ".txt"))
+              ),
+              selectInput("g_bridge_data_type", "Data type",
+                          choices = c("Gaussian" = "gaussian",
+                                      "Nonparanormal" = "nonparanormal",
+                                      "Compositional (coming soon)" = "compositional")),
+              selectInput("g_bridge_prefilter", "Speed pre-filter (label-blind)",
+                          choices = c("None" = "none",
+                                      "Top-variance genes" = "variance",
+                                      "Prior-graph genes only" = "prior")),
+              layout_columns(col_widths = c(6, 6),
+                selectInput("g_bridge_precision", "Estimator",
+                            choices = c("glasso" = "glasso", "mb / fast" = "mb")),
+                numericInput("g_bridge_max_genes", "Max genes", value = 1000, min = 10, step = 50)
+              ),
+              tags$details(
+                tags$summary(class = "text-muted", style = "cursor:pointer; font-size:0.85rem;",
+                             "⚙️ Advanced hyperparameters"),
+                tags$div(style = "margin-top:6px;",
+                  layout_columns(col_widths = c(6, 6),
+                    numericInput("g_bridge_lambda", "lambda", value = 0.1, min = 0, step = 0.01),
+                    numericInput("g_bridge_beta", "beta", value = 0.5, min = 0, max = 0.99, step = 0.05)
+                  ),
+                  layout_columns(col_widths = c(6, 6),
+                    numericInput("g_bridge_lambda2", "lambda2", value = 0.05, min = 0, step = 0.01),
+                    numericInput("g_bridge_lambda1", "lambda1", value = 0.25, min = 0, step = 0.05)
+                  ),
+                  textInput("g_bridge_resolution", "Resolution grid", value = "0.5, 1, 1.5, 2"),
+                  sliderInput("g_bridge_tau", "tau (stability)", min = 0, max = 1, value = 0.6, step = 0.05),
+                  layout_columns(col_widths = c(6, 6),
+                    numericInput("g_bridge_min_size", "Min size", value = 5, min = 1),
+                    numericInput("g_bridge_max_size", "Max size", value = 500, min = 10)
+                  )
+                )
+              ),
+              conditionalPanel(
+                condition = "!output.g_bridge_running",
+                actionButton("g_bridge_run", "\U0001F680 Run BRIDGE grouping",
+                             class = "btn-primary w-100")
+              ),
+              conditionalPanel(
+                condition = "output.g_bridge_running",
+                tags$div(class = "text-muted text-center",
+                         style = "font-size:0.82rem;", "Running… use Stop on the right →")
+              )
+            ),
+            tags$div(
+              gsm_help_callout(
+                "How to run BRIDGE",
+                tagList(
+                  tags$b("1."), " In the sidebar ", tags$b("①"), ", load expression data (example or upload) — or reuse what's loaded. ",
+                  tags$b("2."), " Pick a ", tags$b("prior graph source"), " (an example pathway/disease file, your own upload, or 'None' for purely data-driven). ",
+                  tags$b("3."), " Keep the ", tags$b("speed pre-filter"), " on (Top-variance ~1000 genes) so it finishes fast. ",
+                  tags$b("4."), " Click ", tags$b("Run"), " — it computes on ALL samples (exploratory), with a live progress bar; ", tags$b("Stop"), " anytime. ",
+                  tags$b("5."), " Inspect the modules/network, then ", tags$b("Apply to pipeline"),
+                  " (sidebar ③) — GSM re-derives it per training fold.")),
+              uiOutput("g_bridge_progress"),
+              uiOutput("g_bridge_valueboxes"),
+              uiOutput("g_bridge_diag_card"),
+              card(full_screen = TRUE, card_header("Modules (J = D + λ₁C − λ₂|M|)"),
+                   DTOutput("g_bridge_modules_dt")),
+              card(full_screen = TRUE, card_header("Module-size distribution"),
+                   plotOutput("g_bridge_size_hist", height = "240px")),
+              card(full_screen = TRUE,
+                   card_header("Differential-network modules"),
+                   visNetwork::visNetworkOutput("g_bridge_network", height = "420px"))
+            )
+          )
+        )
+      )
+    )
+  ),
+
+  # ── Tab 4: Pre-Scoring ──────────────────────────────────────────────────
   nav_flow_sep(),
   nav_panel(
     value = "prescore",
-    title = nav_step_title("3", "\U0001F4CA", "Pre-Score"),
+    title = nav_step_title("4", "\U0001F4CA", "Pre-Score"),
     layout_sidebar(
       sidebar = sidebar(
         title = "\U2699\UFE0F Pre-Score — Settings",
@@ -849,7 +1052,7 @@ ui <- page_navbar(
   nav_flow_sep(),
   nav_panel(
     value = "score",
-    title = nav_step_title("4", "\U0001F3AF", "GSM"),
+    title = nav_step_title("5", "\U0001F3AF", "GSM"),
     layout_sidebar(
       sidebar = sidebar(
         title = "\U2699\UFE0F GSM — Settings",
@@ -975,6 +1178,10 @@ ui <- page_navbar(
                        class = "btn-danger btn-sm")
         ),
         uiOutput("mccv_live_status"),
+        card(
+          card_header("Live: per-fold progress (updates every second)"),
+          uiOutput("mccv_fold_progress")
+        ),
         layout_columns(
           col_widths = c(6, 6),
           card(
@@ -1433,6 +1640,10 @@ server <- function(input, output, session) {
     collapse_result = NULL,
     collapsed       = FALSE,
 
+    # Grouping (G) tab — standalone run + inspect results per method
+    g_file   = NULL,   # list(groups)
+    g_bridge = NULL,   # list(groups, diagnostics, summary, graph, spec)
+
     # Pre-score
     prescore_groups = NULL,
     prescored       = FALSE,
@@ -1468,8 +1679,12 @@ server <- function(input, output, session) {
     last_summary = NULL     # snapshot shown in the persistent "done" banner
   )
 
+  # G-tab BRIDGE run: cancellable background job (mirrors the MCCV scheduler).
+  gbr <- reactiveValues(active = FALSE, job = NULL, t0 = NULL, tick = 0)
+
   # ── Output flags for conditionalPanel ──────────────────────────────────
   output$data_loaded     <- reactive(rv$loaded)
+  output$g_bridge_running <- reactive(isTRUE(gbr$active))
   output$collapse_done   <- reactive(rv$collapsed)
   output$prescore_done   <- reactive(rv$prescored)
   output$prescore_running <- reactive(isTRUE(ps$active))
@@ -1482,6 +1697,7 @@ server <- function(input, output, session) {
   outputOptions(output, "prescore_running", suspendWhenHidden = FALSE)
   outputOptions(output, "score_done",       suspendWhenHidden = FALSE)
   outputOptions(output, "mccv_running",     suspendWhenHidden = FALSE)
+  outputOptions(output, "g_bridge_running", suspendWhenHidden = FALSE)
   outputOptions(output, "permtest_done",    suspendWhenHidden = FALSE)
 
   # ══════════════════════════════════════════════════════════════════════
@@ -1607,16 +1823,6 @@ server <- function(input, output, session) {
             }
           }
 
-          # Parse the resolution grid text field into a numeric vector.
-          res_grid <- as.numeric(strsplit(
-            input$bridge_resolution %||% "0.5,1,1.5,2", "[,[:space:]]+")[[1]])
-          res_grid <- res_grid[is.finite(res_grid) & res_grid > 0]
-          if (!length(res_grid)) res_grid <- c(0.5, 1, 1.5, 2)
-
-          max_genes <- suppressWarnings(as.integer(input$bridge_max_genes))
-          if (length(max_genes) == 0 || is.na(max_genes) || max_genes <= 0)
-            max_genes <- NULL
-
           # Resolve the label-free prior ONCE so the same object can be reused
           # for every CV fold (stored on grouping_spec below).
           prior_obj <- switch(prior_source,
@@ -1624,21 +1830,9 @@ server <- function(input, output, session) {
             groups = prior_groups,
             file   = bridge_read_prior_file(prior_file))
 
-          bridge_args <- list(
-            lambda    = input$bridge_lambda %||% 0.1,
-            beta      = input$bridge_beta %||% 0.5,
-            lambda2   = input$bridge_lambda2 %||% 0.05,
-            lambda1   = input$bridge_lambda1 %||% 0.25,
-            resolution = res_grid,
-            tau       = input$bridge_tau %||% 0.6,
-            data_type = input$bridge_data_type %||% "gaussian",
-            precision_method = input$bridge_precision %||% "glasso",
-            prefilter = input$bridge_prefilter %||% "none",
-            max_genes = max_genes,
-            min_size  = input$min_group_size,
-            max_size  = input$max_group_size,
-            verbose   = FALSE
-          )
+          bridge_args <- build_bridge_args(input, "bridge",
+                                           input$min_group_size,
+                                           input$max_group_size)
 
           # Recipe carried on the dataset so folds re-derive groups train-only.
           grouping_spec <- list(
@@ -1881,6 +2075,17 @@ server <- function(input, output, session) {
     sizes <- vapply(rv$dataset$groups, length, integer(1))
     par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
         col.main = "#cccccc", fg = "#555555", mar = c(4, 4, 2, 1))
+    # Deferred BRIDGE (no preview groups): nothing to histogram — explain instead.
+    if (length(sizes) == 0) {
+      plot.new()
+      text(0.5, 0.5, paste0(
+        "BRIDGE groups are derived per training fold.\n",
+        "No preview groups to plot.\n",
+        "Run the GSM tab to see per-fold groups,\n",
+        "or tick 'Compute discovery preview now' on the Data tab."),
+        col = "#aaaaaa", cex = 1.05)
+      return(invisible())
+    }
     hist(sizes, breaks = 30, col = "#4a90d9", border = NA,
          main = "", xlab = "Genes per group", ylab = "Frequency", las = 1)
     abline(v = median(sizes), col = "#f1c232", lwd = 2, lty = 2)
@@ -2599,6 +2804,9 @@ server <- function(input, output, session) {
         mc$fold_started <- list()
         mc$summary_open <- FALSE
         mc$last_summary <- NULL
+        # Per-fold live-progress files written by the forked workers.
+        mc$progress_dir <- tempfile("gsm_mccv_")
+        dir.create(mc$progress_dir, showWarnings = FALSE)
         showNotification(sprintf("🚀 Starting Parallel MCCV: %d folds on %d core(s)…",
                                  mc$n, mc$cores), type = "message", duration = 5)
       }
@@ -2743,8 +2951,12 @@ server <- function(input, output, session) {
         running <- mc$running
         queue   <- mc$queue
         started <- mc$fold_started
+        pdir    <- mc$progress_dir     # read reactive HERE (parent), not in fork
         while (length(running) < cores && length(queue) > 0) {
           idx <- queue[1]; queue <- queue[-1]
+          # Plain-string path built in the parent; the fork must not touch any
+          # reactive object (would error: reactive context accessed cross-process).
+          pf <- file.path(pdir, paste0("fold_", idx, ".txt"))
           job <- parallel::mcparallel(
             tryCatch(
               mccv_run_fold(
@@ -2757,7 +2969,8 @@ server <- function(input, output, session) {
                 fdr_alpha = p$fdr_alpha %||% 0.05,
                 shave_method = p$shave_method %||% "fdr", shave_k = p$shave_k %||% 100,
                 normalize = p$normalize %||% FALSE,
-                seed = p$seed),
+                seed = p$seed,
+                progress_file = pf),
               error = function(e) list(fold = idx, status = "error",
                                        error_message = conditionMessage(e))),
             name = as.character(idx))
@@ -2782,7 +2995,9 @@ server <- function(input, output, session) {
             fdr_alpha = p$fdr_alpha %||% 0.05,
             shave_method = p$shave_method %||% "fdr", shave_k = p$shave_k %||% 100,
             normalize = p$normalize %||% FALSE,
-            seed = p$seed),
+            seed = p$seed,
+            progress_file = file.path(mc$progress_dir,
+                                      paste0("fold_", idx, ".txt"))),
           error = function(e) list(fold = idx, status = "error",
                                    error_message = conditionMessage(e)))
         folds <- mc$folds; folds[[idx]] <- fr; mc$folds <- folds
@@ -2973,6 +3188,50 @@ server <- function(input, output, session) {
         tags$span(class = "text-muted", gsub("_", " ", nm)),
         tags$b(sprintf("%.3f", means[[nm]])))
     }))
+  })
+
+  # ── Live per-fold progress: reads each forked worker's stage file ─────────
+  output$mccv_fold_progress <- renderUI({
+    req(mc$active)
+    invalidateLater(1000)                       # tick the elapsed clocks
+    n <- mc$n %||% 0L
+    if (n == 0) return(tags$p(class = "text-muted", "Preparing folds…"))
+    now <- as.numeric(difftime(Sys.time(), mc$t0, units = "secs"))
+    running_names <- names(mc$running)
+    started <- mc$fold_started
+    dir <- mc$progress_dir %||% ""
+    fmt <- function(s) { s <- max(0L, as.integer(round(s))); sprintf("%d:%02d", s %/% 60L, s %% 60L) }
+    read_stage <- function(i) {
+      f <- file.path(dir, paste0("fold_", i, ".txt"))
+      if (nzchar(dir) && file.exists(f)) {
+        v <- tryCatch(readLines(f, warn = FALSE), error = function(e) character(0))
+        if (length(v)) return(utils::tail(v, 1))
+      }
+      ""
+    }
+    rows <- lapply(seq_len(n), function(i) {
+      done <- !is.null(mc$folds[[i]])
+      if (done) {
+        ok <- identical(mc$folds[[i]]$status, "success")
+        icon <- if (ok) "✅" else "❌"
+        txt  <- if (ok) "done" else paste0("failed: ", mc$folds[[i]]$error_message %||% "error")
+        el   <- ""
+      } else if (as.character(i) %in% running_names) {
+        icon <- "⏳"
+        stg  <- read_stage(i); if (!nzchar(stg)) stg <- "starting"
+        st   <- started[[as.character(i)]] %||% now
+        el   <- fmt(now - st)
+        txt  <- stg
+      } else {
+        icon <- "•"; txt <- "queued"; el <- ""
+      }
+      col <- if (grepl("^failed", txt)) "#e06666" else "#aaaaaa"
+      tags$div(style = "display:flex; justify-content:space-between; gap:10px; padding:3px 0; border-bottom:1px solid rgba(255,255,255,0.05);",
+        tags$span(sprintf("%s Fold %d", icon, i)),
+        tags$span(style = sprintf("text-align:right; color:%s;", col),
+                  paste0(txt, if (nzchar(el)) paste0("  ·  ", el) else "")))
+    })
+    tagList(rows)
   })
 
   # ── Run configuration panel: exactly what this run used, with numbers ─────
@@ -3464,6 +3723,356 @@ server <- function(input, output, session) {
   .dt <- function(df, page = 15, dom = "ftp")
     datatable(df, options = list(pageLength = page, dom = dom, scrollX = TRUE),
               rownames = FALSE, class = "compact stripe")
+
+  # ══ Grouping (G) tab ════════════════════════════════════════════════════
+  # Shared renderers for the "run a grouping method and inspect it" surface.
+  .g_valueboxes <- function(groups, expr) {
+    sizes <- vapply(groups, length, integer(1))
+    genes <- unique(unlist(groups))
+    cov <- if (nrow(expr) > 0)
+      round(100 * length(intersect(genes, rownames(expr))) / nrow(expr), 1) else 0
+    layout_columns(
+      col_widths = c(3, 3, 3, 3),
+      value_box_ui(length(groups), "Groups", "\U0001F9E9"),
+      value_box_ui(format(length(genes), big.mark = ","), "Unique genes", "\U0001F9EC"),
+      value_box_ui(if (length(sizes)) stats::median(sizes) else 0, "Median size", "\U0001F4CF"),
+      value_box_ui(paste0(cov, "%"), "Gene coverage", "\U0001F4CA")
+    )
+  }
+  .g_groups_df <- function(groups, scores = NULL) {
+    if (length(groups) == 0) return(data.frame(Group = character(0)))
+    df <- data.frame(
+      Group = names(groups),
+      Genes = vapply(groups, length, integer(1)),
+      Members = vapply(groups, function(g) {
+        s <- paste(utils::head(g, 12), collapse = ", ")
+        if (length(g) > 12) paste0(s, ", …") else s
+      }, character(1)),
+      row.names = NULL, stringsAsFactors = FALSE)
+    if (!is.null(scores) && length(scores) == nrow(df)) {
+      df <- cbind(df[1:2], Score = round(as.numeric(scores), 4), Members = df$Members)
+      df <- df[order(-df$Score), , drop = FALSE]
+    } else {
+      df <- df[order(-df$Genes), , drop = FALSE]
+    }
+    df
+  }
+  .g_size_hist <- function(groups, col = "#4a90d9") {
+    sizes <- vapply(groups, length, integer(1))
+    par(bg = "transparent", col.axis = "#aaaaaa", col.lab = "#aaaaaa",
+        col.main = "#cccccc", fg = "#555555", mar = c(4, 4, 2, 1))
+    if (length(sizes) == 0) { plot.new(); text(0.5, 0.5, "No groups yet.", col = "#aaaaaa"); return(invisible()) }
+    hist(sizes, breaks = max(5, min(30, length(sizes))), col = col, border = NA,
+         main = "", xlab = "Genes per group", ylab = "Frequency", las = 1)
+    abline(v = stats::median(sizes), col = "#f1c232", lwd = 2, lty = 2)
+  }
+  .g_expr <- function() rv$expr_data$expr
+
+  # Resolve an example grouping-file selection to a named list (reuses Data-tab
+  # example dir + toy fallback).
+  .g_read_example_groups <- function(sel) {
+    if (is.null(sel) || !nzchar(sel))
+      stop("Pick an example grouping file.")
+    path <- if (identical(sel, "__toy__"))
+      system.file("extdata", "test_groups.csv", package = "gsmR")
+      else file.path(.example_groups_dir, sel)
+    if (!file.exists(path)) stop("Example grouping file not found: ", sel)
+    if (identical(tolower(tools::file_ext(path)), "gmt")) read_gmt(path)
+    else read_groups(path)
+  }
+
+  # ── Step A: load expression data for grouping (shared with the pipeline) ──
+  observeEvent(input$g_load_data, {
+    src_upload <- !is.null(input$g_expr_upload)
+    sel <- input$g_example_expr %||% ""
+    if (!src_upload && !nzchar(sel))
+      return(showNotification("⚠️ Pick an example dataset or upload an expression CSV.",
+                              type = "warning"))
+    path <- if (src_upload) input$g_expr_upload$datapath
+            else if (identical(sel, "__toy__"))
+              system.file("extdata", "test_expression.csv", package = "gsmR")
+            else file.path(.example_input_dir, sel)
+    if (is.null(path) || !nzchar(path) || !file.exists(path))
+      return(showNotification("❌ Expression file not found.", type = "error", duration = 8))
+    tryCatch({
+      ed <- withProgress(message = "Loading expression…", value = 0.4,
+                         read_expression(path))
+      rv$expr_data <- ed
+      rv$g_file <- NULL; rv$g_bridge <- NULL           # clear stale results
+      showNotification(sprintf("✅ Loaded %d samples × %d genes.",
+                               ncol(ed$expr), nrow(ed$expr)), type = "message")
+    }, error = function(e)
+      showNotification(paste("❌", e$message), type = "error", duration = 10))
+  })
+  output$g_data_status <- renderUI({
+    if (is.null(rv$expr_data))
+      return(tags$div(class = "text-warning", style = "font-size:0.82rem;",
+                      "No expression data yet — load one below or on the Data tab."))
+    ed <- rv$expr_data
+    tags$div(class = "text-success", style = "font-size:0.82rem;",
+             sprintf("✅ %d samples × %d genes, %d classes", ncol(ed$expr),
+                     nrow(ed$expr), nlevels(ed$labels)))
+  })
+
+  # ── From-file method: run + render ───────────────────────────────────────
+  observeEvent(input$g_file_run, {
+    req(rv$expr_data)
+    if (is.null(input$g_file_upload))
+      return(showNotification("⚠️ Upload a grouping file first.", type = "warning"))
+    tryCatch({
+      groups <- compute_grouping("file", file = input$g_file_upload$datapath,
+                                 format = input$g_file_format)
+      rv$g_file <- list(groups = groups)
+      showNotification(sprintf("✅ Loaded %d group(s).", length(groups)), type = "message")
+    }, error = function(e)
+      showNotification(paste("❌", e$message), type = "error", duration = 10))
+  })
+  output$g_file_valueboxes <- renderUI({ req(rv$g_file); .g_valueboxes(rv$g_file$groups, .g_expr()) })
+  output$g_file_groups_dt   <- renderDT({ req(rv$g_file); .dt(.g_groups_df(rv$g_file$groups)) })
+  output$g_file_size_hist   <- renderPlot({ req(rv$g_file); .g_size_hist(rv$g_file$groups) }, bg = "transparent")
+
+  # ── BRIDGE method: run (all samples, exploratory) + rich render ──────────
+  # BRIDGE grouping runs in a BACKGROUND FORK so the UI stays responsive and the
+  # Stop button works (a synchronous run would block Shiny and be uncancellable).
+  observeEvent(input$g_bridge_run, {
+    if (is.null(rv$expr_data)) {
+      showNotification("⚠️ Load expression data first (① in the sidebar, or the Data tab).",
+                       type = "warning", duration = 8); return()
+    }
+    if (isTRUE(gbr$active)) {
+      showNotification("⏳ BRIDGE is already running — Stop it first.", type = "warning")
+      return()
+    }
+    # Resolve the prior source (aborts with a clear message on any problem).
+    src <- input$g_bridge_prior_source %||% "none"
+    prior_obj <- NULL; ok <- TRUE
+    if (src == "example") {
+      sel <- input$g_bridge_prior_example %||% ""
+      prior_obj <- tryCatch(.g_read_example_groups(sel),
+        error = function(e) { showNotification(paste("❌", e$message),
+                                type = "error", duration = 10); ok <<- FALSE; NULL })
+    } else if (src == "loaded") {
+      if (is.null(rv$groups) || length(rv$groups) == 0) {
+        showNotification("❌ No grouping loaded on the Data tab. Pick 'Example', 'Upload', or 'None'.",
+                         type = "error", duration = 10); ok <- FALSE
+      } else prior_obj <- rv$groups
+    } else if (src == "upload") {
+      if (is.null(input$g_bridge_prior_file)) {
+        showNotification("❌ Upload a prior file, or choose a different source.",
+                         type = "error", duration = 10); ok <- FALSE
+      } else prior_obj <- tryCatch(
+        bridge_read_prior_file(input$g_bridge_prior_file$datapath),
+        error = function(e) { showNotification(paste("❌", e$message),
+                                type = "error", duration = 10); ok <<- FALSE; NULL })
+    }
+    if (!ok) return()
+
+    args <- build_bridge_args(input, "g_bridge",
+                              input$g_bridge_min_size, input$g_bridge_max_size)
+    # Plain objects captured in the PARENT (never touch reactives inside a fork).
+    X <- rv$expr_data$expr; y <- rv$expr_data$labels
+    pfile <- tempfile("gbridge_prog_")   # plain string; fork writes stage markers
+    call_args <- c(list(X = X, y = y, B = prior_obj, details = TRUE,
+                        progress_file = pfile), args)
+    rv$g_bridge <- NULL
+    gbr$prior <- prior_obj; gbr$args <- args; gbr$progress_file <- pfile
+    gbr$t0 <- Sys.time(); gbr$tick <- 0; gbr$active <- TRUE
+
+    if (.Platform$OS.type != "windows") {
+      gbr$job <- parallel::mcparallel(
+        tryCatch(do.call(bridge_grouping, call_args),
+                 error = function(e) structure(list(), bridge_error = conditionMessage(e))),
+        name = "g_bridge")
+    } else {
+      # No fork on Windows: run synchronously (blocking; Stop unavailable).
+      res <- tryCatch(do.call(bridge_grouping, call_args),
+                      error = function(e) structure(list(), bridge_error = conditionMessage(e)))
+      gbr$active <- FALSE
+      .g_bridge_finish(res, prior_obj, args)
+    }
+  })
+
+  # Finalize a completed BRIDGE result (shared by fork poller + Windows path).
+  .g_bridge_finish <- function(res, prior_obj, args) {
+    err <- attr(res, "bridge_error")
+    if (!is.null(err))
+      return(showNotification(paste("❌", err), type = "error", duration = 12))
+    if (length(res) == 0)
+      return(showNotification("BRIDGE produced no groups — lower tau/min size or adjust lambda.",
+                              type = "warning", duration = 10))
+    rv$g_bridge <- list(
+      groups = res, diagnostics = attr(res, "diagnostics"),
+      summary = attr(res, "summary"), graph = attr(res, "graph"),
+      spec = list(method = "bridge", prior = prior_obj, args = args))
+    showNotification(sprintf("✅ BRIDGE derived %d module(s).", length(res)), type = "message")
+  }
+
+  # Poller: reap the forked BRIDGE job without blocking the UI.
+  observe({
+    req(gbr$active)
+    invalidateLater(600)
+    isolate({
+      if (is.null(gbr$job)) return()
+      got <- tryCatch(parallel::mccollect(gbr$job, wait = FALSE, timeout = 0),
+                      error = function(e) NULL)
+      if (!is.null(got)) {
+        res <- got[[1]]
+        gbr$active <- FALSE; gbr$job <- NULL
+        if (is.null(res)) {
+          showNotification("❌ BRIDGE worker crashed.", type = "error", duration = 10)
+        } else {
+          .g_bridge_finish(res, gbr$prior, gbr$args)
+        }
+      }
+    })
+  })
+
+  # Stop a running BRIDGE fork.
+  observeEvent(input$g_bridge_stop, {
+    req(gbr$active)
+    if (!is.null(gbr$job)) {
+      pid <- tryCatch(gbr$job$pid, error = function(e) NULL)
+      if (!is.null(pid)) tryCatch(tools::pskill(pid, tools::SIGKILL), error = function(e) NULL)
+      tryCatch(parallel::mccollect(gbr$job, wait = FALSE), error = function(e) NULL)
+    }
+    gbr$active <- FALSE; gbr$job <- NULL
+    showNotification("⏹️ BRIDGE run stopped.", type = "warning", duration = 6)
+  })
+
+  # Live "running" banner: stage-based progress bar (steps 1..5) + elapsed clock.
+  output$g_bridge_progress <- renderUI({
+    req(gbr$active); invalidateLater(800)
+    el <- as.integer(round(as.numeric(difftime(Sys.time(), gbr$t0, units = "secs"))))
+    step <- 1L; label <- "starting…"
+    pf <- gbr$progress_file %||% ""
+    if (nzchar(pf) && file.exists(pf)) {
+      v <- tryCatch(readLines(pf, warn = FALSE), error = function(e) character(0))
+      if (length(v)) {
+        parts <- strsplit(utils::tail(v, 1), "|", fixed = TRUE)[[1]]
+        step <- suppressWarnings(as.integer(parts[1])); if (is.na(step)) step <- 1L
+        label <- if (length(parts) > 1) parts[2] else "working…"
+      }
+    }
+    pct <- max(8, min(100, round(step / 5 * 100)))
+    tags$div(class = "value-box",
+      style = "background: rgba(244,166,35,0.12); border-left:4px solid #f4a623;",
+      tags$div(style = "display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;",
+        tags$div(tags$b("⏳ Running BRIDGE grouping"),
+                 tags$div(class = "text-muted", style = "font-size:0.82rem;",
+                          sprintf("Step %d/5 · %s", step, label))),
+        tags$div(style = "display:flex; align-items:center; gap:10px;",
+          tags$span(class = "text-muted", style = "font-size:0.82rem;",
+                    sprintf("%d:%02d", el %/% 60L, el %% 60L)),
+          actionButton("g_bridge_stop", "⏹️ Stop", class = "btn-danger btn-sm"))),
+      tags$div(class = "progress", style = "height:14px; background:rgba(255,255,255,0.08);",
+        tags$div(class = "progress-bar progress-bar-striped progress-bar-animated",
+                 role = "progressbar",
+                 style = sprintf("width:%d%%; background-color:#f4a623;", pct),
+                 `aria-valuenow` = pct, `aria-valuemin` = 0, `aria-valuemax` = 100)),
+      tags$div(class = "text-muted", style = "font-size:0.75rem; margin-top:4px;",
+               "Runs on all samples (exploratory). The 'estimating networks' step is the slowest; a stronger pre-filter makes it faster."))
+  })
+  output$g_bridge_valueboxes <- renderUI({ req(rv$g_bridge); .g_valueboxes(rv$g_bridge$groups, .g_expr()) })
+  output$g_bridge_size_hist  <- renderPlot({ req(rv$g_bridge); .g_size_hist(rv$g_bridge$groups, "#6aa84f") }, bg = "transparent")
+  output$g_bridge_modules_dt <- renderDT({
+    req(rv$g_bridge)
+    d <- rv$g_bridge$diagnostics
+    validate(need(!is.null(d) && nrow(d) > 0, "No modules."))
+    gr <- rv$g_bridge$groups
+    d$genes <- vapply(d$module, function(m) {
+      g <- gr[[m]]; s <- paste(utils::head(g, 10), collapse = ", ")
+      if (length(g) > 10) paste0(s, ", …") else s
+    }, character(1))
+    d[2:6] <- lapply(d[2:6], function(x) if (is.numeric(x)) round(x, 4) else x)
+    .dt(d[order(-d$J), c("module", "size", "J", "D", "C", "stability", "genes")])
+  })
+  output$g_bridge_diag_card <- renderUI({
+    req(rv$g_bridge); s <- rv$g_bridge$summary
+    if (is.null(s)) return(NULL)
+    chip <- function(lab, val) tags$div(
+      style = "flex:1 1 130px; text-align:center; padding:8px; background:rgba(255,255,255,0.04); border-radius:8px;",
+      tags$div(class = "text-muted", style = "font-size:.7rem; text-transform:uppercase;", lab),
+      tags$div(style = "font-size:1.05rem; font-weight:700;", val))
+    sweep <- paste(sprintf("r%s: %d", names(s$res_counts), s$res_counts), collapse = "  ·  ")
+    tags$div(class = "card", style = "margin-bottom:12px; padding:12px;",
+      tags$div(style = "font-weight:700; margin-bottom:8px;", "🔬 BRIDGE diagnostics"),
+      tags$div(style = "display:flex; flex-wrap:wrap; gap:10px;",
+        chip("Pre-filter kept", sprintf("%d / %d", s$prefilter_kept, s$n_features_total %||% s$prefilter_kept)),
+        chip("Est. features", s$n_features),
+        chip("Backend", s$backend),
+        chip("Candidates → selected", sprintf("%d → %d", s$n_candidates, nrow(rv$g_bridge$diagnostics))),
+        chip("Prior genes / edges", sprintf("%d / %d", s$prior_genes, s$prior_edges))),
+      tags$div(class = "text-muted", style = "margin-top:8px; font-size:0.82rem;",
+               paste0("Modules per resolution — ", sweep)))
+  })
+  output$g_bridge_network <- visNetwork::renderVisNetwork({
+    req(rv$g_bridge)
+    validate(need(requireNamespace("visNetwork", quietly = TRUE),
+                  "Install 'visNetwork' for the interactive network."))
+    edges <- rv$g_bridge$graph
+    validate(need(!is.null(edges) && nrow(edges) > 0, "No differential-network edges to show."))
+    # Map each gene to its (first) selected module for colouring.
+    gr <- rv$g_bridge$groups
+    g2m <- stats::setNames(rep(names(gr), lengths(gr)), unlist(gr))
+    nodes_id <- union(edges$from, edges$to)
+    nodes <- data.frame(id = nodes_id, label = nodes_id,
+                        group = g2m[nodes_id] %||% "—", stringsAsFactors = FALSE)
+     e <- data.frame(from = edges$from, to = edges$to,
+                     value = edges$weight, stringsAsFactors = FALSE)
+    visNetwork::visNetwork(nodes, e) |>
+      visNetwork::visIgraphLayout(layout = "layout_with_fr") |>
+      visNetwork::visOptions(highlightNearest = list(enabled = TRUE, degree = 1),
+                             nodesIdSelection = FALSE) |>
+      visNetwork::visInteraction(tooltipDelay = 100) |>
+      visNetwork::visPhysics(stabilization = TRUE)
+  })
+
+  # ── Apply the active method's grouping to the pipeline ───────────────────
+  observeEvent(input$g_apply, {
+    if (is.null(rv$expr_data))
+      return(showNotification("⚠️ Load expression data first.", type = "warning"))
+    ed <- rv$expr_data
+    method_tab <- input$g_method_tabs %||% "g_file"
+    tryCatch({
+      ds <- if (identical(method_tab, "g_bridge")) {
+        validate(need(!is.null(rv$g_bridge), "Run BRIDGE first."))
+        # Commit the deferred recipe (leakage-free): groups re-derived per fold.
+        gsm_dataset(ed$expr, ed$labels, groups = list(),
+                    min_group_size = input$g_bridge_min_size %||% 5,
+                    max_group_size = input$g_bridge_max_size %||% 500,
+                    grouping_spec = rv$g_bridge$spec)
+      } else {
+        validate(need(!is.null(rv$g_file), "Run a file grouping first."))
+        gsm_dataset(ed$expr, ed$labels, rv$g_file$groups,
+                    min_group_size = input$min_group_size %||% 5,
+                    max_group_size = input$max_group_size %||% 500)
+      }
+      rv$dataset <- ds
+      rv$groups  <- ds$groups
+      rv$loaded  <- TRUE
+      rv$dataset_name <- rv$dataset_name %||% "dataset"
+      # Reset downstream so Pre-Score / GSM don't show stale results.
+      rv$collapsed <- FALSE; rv$prescored <- FALSE; rv$scored <- FALSE
+      rv$prescore_groups <- NULL; rv$score_results <- NULL; rv$mccv_results <- NULL
+      showNotification(sprintf("✅ Applied %s grouping to the pipeline.",
+                               if (identical(method_tab, "g_bridge")) "BRIDGE (per-fold)" else "file"),
+                       type = "message")
+    }, error = function(e)
+      showNotification(paste("❌", e$message), type = "error", duration = 10))
+  })
+  output$g_active_status <- renderUI({
+    val <- if (is.null(rv$dataset)) "— none applied yet —"
+    else {
+      gm <- rv$dataset$params$grouping_method %||% "file"
+      n  <- rv$dataset$params$n_groups
+      if (gm == "bridge" && n == 0) "BRIDGE (per-fold)"
+      else sprintf("%s — %d groups", if (gm == "bridge") "BRIDGE" else "file", n)
+    }
+    tags$div(style = "margin-top:8px;",
+      tags$div(class = "text-muted", style = "font-size:0.78rem; text-transform:uppercase;",
+               "Active pipeline grouping"),
+      tags$div(style = "font-weight:700; font-size:1.0rem; color:#4a90d9;", val))
+  })
 
   output$rra_group_table <- renderDT({
     tb <- gsmR:::gsm_tbl_group_rra(.mccv_folds())

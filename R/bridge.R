@@ -221,7 +221,9 @@ bridge_prefilter <- function(X, method = c("none", "variance", "prior"),
 bridge_estimate_precision <- function(X0, X1, B, lambda = 0.1, beta = 0.5,
                                       lambda2 = 0.05,
                                       data_type = "gaussian",
-                                      precision_method = "glasso") {
+                                      precision_method = "glasso",
+                                      progress = NULL) {
+  pg <- function(lbl) if (!is.null(progress)) progress(lbl)
   data_type <- match.arg(data_type,
                          c("gaussian", "nonparanormal", "compositional"))
   precision_method <- match.arg(precision_method, c("glasso", "mb"))
@@ -267,11 +269,14 @@ bridge_estimate_precision <- function(X0, X1, B, lambda = 0.1, beta = 0.5,
       dimnames(Theta) <- list(colnames(Xc), colnames(Xc))
       Theta
     }
-    return(list(Theta0 = est_mb(X0), Theta1 = est_mb(X1), backend = "huge-mb"))
+    pg("class 1/2 network (mb)…"); T0 <- est_mb(X0)
+    pg("class 2/2 network (mb)…"); T1 <- est_mb(X1)
+    return(list(Theta0 = T0, Theta1 = T1, backend = "huge-mb"))
   }
 
   # Preferred backend: JGL (joint, with fused penalty). Requires equal columns.
   if (requireNamespace("JGL", quietly = TRUE)) {
+    pg("joint graphical lasso (JGL)…")
     fit <- tryCatch(
       JGL::JGL(list(as.matrix(X0), as.matrix(X1)),
                penalty = "fused", lambda1 = lambda, lambda2 = lambda2,
@@ -298,7 +303,9 @@ bridge_estimate_precision <- function(X0, X1, B, lambda = 0.1, beta = 0.5,
     dimnames(Theta) <- list(colnames(Xc), colnames(Xc))
     Theta
   }
-  list(Theta0 = est_one(X0), Theta1 = est_one(X1), backend = "glasso")
+  pg("class 1/2 network (glasso)…"); T0 <- est_one(X0)
+  pg("class 2/2 network (glasso)…"); T1 <- est_one(X1)
+  list(Theta0 = T0, Theta1 = T1, backend = "glasso")
 }
 
 # ── Differential network + module extraction ─────────────────────────────────
@@ -314,10 +321,14 @@ bridge_estimate_precision <- function(X0, X1, B, lambda = 0.1, beta = 0.5,
 #' @param Theta0,Theta1 Precision matrices from [bridge_estimate_precision()].
 #' @param B Symmetric prior matrix (or `NULL`).
 #' @param resolution Numeric vector of Leiden resolutions to sweep.
+#' @param details If `TRUE`, attach the normalized blended graph `W` (attribute
+#'   `"graph_W"`) and the per-resolution module counts (attribute `"res_counts"`)
+#'   for inspection.
 #' @return A named list of character vectors: candidate modules across all
 #'   resolutions (names encode the resolution and cluster id).
 #' @keywords internal
-bridge_extract_modules <- function(Theta0, Theta1, B, resolution) {
+bridge_extract_modules <- function(Theta0, Theta1, B, resolution,
+                                   details = FALSE, progress = NULL) {
   feats <- rownames(Theta0)
   p <- length(feats)
   Delta <- abs(Theta1 - Theta0)
@@ -335,15 +346,27 @@ bridge_extract_modules <- function(Theta0, Theta1, B, resolution) {
   dimnames(W) <- list(feats, feats)
 
   modules <- list()
-  for (res in resolution) {
+  res_counts <- integer(0)
+  for (ri in seq_along(resolution)) {
+    res <- resolution[ri]
+    if (!is.null(progress))
+      progress(sprintf("community detection: resolution %s (%d/%d)…",
+                       format(res, trim = TRUE), ri, length(resolution)))
     memb <- detect_communities(W, method = "leiden", resolution = res)
+    n_here <- 0L
     for (cl in unique(memb)) {
       genes <- names(memb)[memb == cl]
       if (length(genes) >= 2) {
         key <- sprintf("BRIDGE_r%s_c%s", format(res, trim = TRUE), cl)
         modules[[key]] <- sort(genes)
+        n_here <- n_here + 1L
       }
     }
+    res_counts[format(res, trim = TRUE)] <- n_here
+  }
+  if (details) {
+    attr(modules, "graph_W") <- W
+    attr(modules, "res_counts") <- res_counts
   }
   modules
 }
@@ -404,21 +427,30 @@ bridge_cohesion <- function(genes, B) {
 #' @param lambda2 Size penalty in `J(M)`.
 #' @param tau Bootstrap-stability threshold in `[0, 1]`.
 #' @param n_boot Number of bootstrap resamples for stability.
+#' @param details If `TRUE`, attach a per-module `"diagnostics"` data.frame
+#'   (`module, size, J, D, C, stability`) alongside `"scores"`.
 #' @return Named list of the selected modules (character vectors), with a
-#'   `"scores"` attribute (the `J(M)` values).
+#'   `"scores"` attribute (the `J(M)` values) and, when `details = TRUE`, a
+#'   `"diagnostics"` data.frame.
 #' @keywords internal
 bridge_score_modules <- function(modules, X_gs, y, B, lambda1 = 0.25,
-                                 lambda2 = 0.05, tau = 0.6, n_boot = 20) {
-  if (length(modules) == 0) return(structure(list(), scores = numeric(0)))
+                                 lambda2 = 0.05, tau = 0.6, n_boot = 20,
+                                 details = FALSE) {
+  empty <- structure(list(), scores = numeric(0))
+  if (details) attr(empty, "diagnostics") <-
+    data.frame(module = character(0), size = integer(0), J = numeric(0),
+               D = numeric(0), C = numeric(0), stability = numeric(0),
+               stringsAsFactors = FALSE)
+  if (length(modules) == 0) return(empty)
   n <- ncol(X_gs)
 
-  score_one <- function(genes) {
-    D <- bridge_discrimination(genes, X_gs, y)
-    C <- bridge_cohesion(genes, B)
-    D + lambda1 * C - lambda2 * length(genes) / 100
-  }
-
-  J <- vapply(modules, score_one, numeric(1))
+  # D(M) and C(M) computed ONCE per module; J is derived from them (so any
+  # diagnostics table is consistent with the J it explains).
+  D <- vapply(modules, function(genes) bridge_discrimination(genes, X_gs, y),
+              numeric(1))
+  C <- vapply(modules, function(genes) bridge_cohesion(genes, B), numeric(1))
+  sizes <- vapply(modules, length, integer(1))
+  J <- D + lambda1 * C - lambda2 * sizes / 100
 
   # Bootstrap stability: fraction of resamples where D(M) stays positive.
   stability <- vapply(modules, function(genes) {
@@ -431,18 +463,25 @@ bridge_score_modules <- function(modules, X_gs, y, B, lambda1 = 0.25,
   }, numeric(1))
 
   keep <- is.finite(J) & J > 0 & stability >= tau
+  if (!any(keep)) return(empty)
   sel <- modules[keep]
-  Jsel <- J[keep]
-  if (length(sel) == 0) return(structure(list(), scores = numeric(0)))
+  Jk <- J[keep]; Dk <- D[keep]; Ck <- C[keep]; Sk <- stability[keep]
 
-  # Deduplicate identical gene sets, keeping the higher J.
-  ord <- order(Jsel, decreasing = TRUE)
-  sel <- sel[ord]; Jsel <- Jsel[ord]
+  # Deduplicate identical gene sets, keeping the higher J (carry D/C/stability).
+  ord <- order(Jk, decreasing = TRUE)
+  sel <- sel[ord]; Jk <- Jk[ord]; Dk <- Dk[ord]; Ck <- Ck[ord]; Sk <- Sk[ord]
   sigs <- vapply(sel, function(g) paste(sort(g), collapse = "\r"), character(1))
   dup <- duplicated(sigs)
-  sel <- sel[!dup]; Jsel <- Jsel[!dup]
+  sel <- sel[!dup]; Jk <- Jk[!dup]; Dk <- Dk[!dup]; Ck <- Ck[!dup]; Sk <- Sk[!dup]
 
-  structure(sel, scores = Jsel)
+  out <- structure(sel, scores = Jk)
+  if (details) {
+    attr(out, "diagnostics") <- data.frame(
+      module = names(sel), size = vapply(sel, length, integer(1)),
+      J = Jk, D = Dk, C = Ck, stability = Sk,
+      row.names = NULL, stringsAsFactors = FALSE)
+  }
+  out
 }
 
 # ── Public entry point ───────────────────────────────────────────────────────
@@ -496,6 +535,15 @@ bridge_score_modules <- function(modules, X_gs, y, B, lambda1 = 0.25,
 #'   `[min_size, max_size]`. Defaults `5` and `500` (matching `gsm_dataset()`).
 #' @param seed Random seed for reproducibility. Default `1`.
 #' @param verbose Emit progress messages. Default `TRUE`.
+#' @param progress_file Optional path; when set, a `"step|label"` stage marker
+#'   (steps 1-5) is written at each phase so a watcher (the Shiny Grouping tab)
+#'   can show a live progress bar. `NULL` (default) is a no-op.
+#' @param details If `TRUE`, attach inspection attributes for the interactive
+#'   Grouping tab: `"diagnostics"` (per-module `J/D/C/stability/size`),
+#'   `"summary"` (candidate/prefilter/backend/prior counts, per-resolution
+#'   sweep), and `"graph"` (a capped edge list of the differential network among
+#'   selected genes). Default `FALSE` keeps the per-fold cross-validation path
+#'   fast and its output unchanged.
 #' @return A named list of character vectors (`group name -> gene symbols`),
 #'   identical in shape to [read_groups()] output. Carries a `"scores"`
 #'   attribute with each module's `J(M)`. If no module passes the filters, a
@@ -530,11 +578,22 @@ bridge_grouping <- function(X, y, B = NULL,
                             prefilter = c("none", "variance", "prior"),
                             max_genes = NULL,
                             harden = TRUE, min_size = 5, max_size = 500,
-                            seed = 1, verbose = TRUE) {
+                            seed = 1, verbose = TRUE, details = FALSE,
+                            progress_file = NULL) {
   data_type <- match.arg(data_type)
   precision_method <- match.arg(precision_method)
   prefilter <- match.arg(prefilter)
   if (!is.null(seed)) set.seed(seed)
+  n_features_total <- nrow(X)
+
+  # Stream a "step|label" stage marker so a watcher (the Shiny G tab) can show a
+  # live progress bar even though this may run in a forked worker. Steps are
+  # out of 5. No-op when progress_file is NULL (CLI / per-fold MCCV).
+  mp <- function(step, label) {
+    if (is.null(progress_file)) return(invisible())
+    try(writeLines(paste0(step, "|", label), progress_file), silent = TRUE)
+  }
+  mp(1, "validating inputs")
 
   # ── Validate X / y ─────────────────────────────────────────────────────────
   if (!is.matrix(X) || !is.numeric(X)) {
@@ -553,6 +612,7 @@ bridge_grouping <- function(X, y, B = NULL,
          ".", call. = FALSE)
   }
   # ── Label-blind pre-filter (speed; never inspects y) ───────────────────────
+  mp(1, "pre-filtering genes")
   if (prefilter != "none" || !is.null(max_genes)) {
     kept <- bridge_prefilter(X, method = prefilter, max_genes = max_genes, B = B)
     if (verbose && length(kept) < nrow(X)) {
@@ -562,6 +622,7 @@ bridge_grouping <- function(X, y, B = NULL,
     X <- X[kept, , drop = FALSE]
   }
   feats <- rownames(X)
+  prefilter_kept <- length(feats)
 
   # ── Resolve the prior B into a matrix aligned to feats ─────────────────────
   Bmat <- bridge_resolve_prior(B, feats, verbose = verbose)
@@ -577,22 +638,33 @@ bridge_grouping <- function(X, y, B = NULL,
   X1 <- t(Xa[, y == lv[2], drop = FALSE])
   if (verbose) message("BRIDGE: estimating class-conditional networks over ",
                        length(active), " features...")
+  mp(2, sprintf("estimating networks over %d genes (slowest step)…", length(active)))
   est <- bridge_estimate_precision(X0, X1, Ba, lambda = lambda, beta = beta,
                                    lambda2 = lambda2, data_type = data_type,
-                                   precision_method = precision_method)
+                                   precision_method = precision_method,
+                                   progress = function(lbl)
+                                     mp(2, paste0("estimating ", lbl)))
   # Ensure dimnames are the active features.
   dimnames(est$Theta0) <- list(active, active)
   dimnames(est$Theta1) <- list(active, active)
   if (verbose) message("BRIDGE: precision backend = ", est$backend)
 
   # ── Differential network + multi-resolution modules ────────────────────────
-  modules <- bridge_extract_modules(est$Theta0, est$Theta1, Ba, resolution)
-  if (verbose) message("BRIDGE: ", length(modules),
+  mp(3, "extracting modules (community detection)…")
+  modules <- bridge_extract_modules(est$Theta0, est$Theta1, Ba, resolution,
+                                    details = details,
+                                    progress = function(lbl) mp(3, lbl))
+  n_candidates <- length(modules)
+  if (verbose) message("BRIDGE: ", n_candidates,
                        " candidate modules across resolutions.")
 
   # ── Score / stability-filter / select ──────────────────────────────────────
+  mp(4, sprintf("scoring %d modules (bootstrap stability)…", n_candidates))
   selected <- bridge_score_modules(modules, Xa, y, Ba, lambda1 = lambda1,
-                                   lambda2 = lambda2, tau = tau)
+                                   lambda2 = lambda2, tau = tau,
+                                   details = details)
+  mp(5, "finalizing")
+  diag_all <- attr(selected, "diagnostics")   # NULL unless details
 
   # Size filter (matches gsm_dataset conventions).
   if (length(selected) > 0) {
@@ -601,6 +673,8 @@ bridge_grouping <- function(X, y, B = NULL,
     sc <- attr(selected, "scores")[keep]
     selected <- selected[keep]
     attr(selected, "scores") <- sc
+    if (details && !is.null(diag_all))
+      diag_all <- diag_all[keep, , drop = FALSE]
   }
 
   if (length(selected) == 0) {
@@ -608,15 +682,64 @@ bridge_grouping <- function(X, y, B = NULL,
             "filters. Try lowering `tau`, `min_size`, or `lambda`.",
             call. = FALSE)
     out <- structure(list(), scores = numeric(0))
+    if (details) attr(out, "summary") <- list(
+      n_candidates = n_candidates, prefilter_kept = prefilter_kept,
+      n_features = length(active), backend = est$backend,
+      resolutions = resolution, res_counts = attr(modules, "res_counts"),
+      prior_genes = 0L, prior_edges = 0L)
     return(out)
   }
 
   if (verbose) message("BRIDGE: selected ", length(selected),
                        " module(s) as final groups.")
 
+  # ── Optional rich diagnostics for the G-tab (default off; keeps MCCV fast) ──
+  if (details) {
+    prior_genes <- if (is.null(Ba)) 0L else
+      as.integer(sum(Matrix::rowSums(methods::as(Ba, "CsparseMatrix") != 0) > 0))
+    prior_edges <- if (is.null(Ba)) 0L else
+      as.integer(length(methods::as(Ba, "CsparseMatrix")@x) / 2)
+    attr(selected, "diagnostics") <- diag_all
+    attr(selected, "summary") <- list(
+      n_candidates = n_candidates, prefilter_kept = prefilter_kept,
+      n_features_total = n_features_total, n_features = length(active),
+      backend = est$backend, resolutions = resolution,
+      res_counts = attr(modules, "res_counts"),
+      prior_genes = prior_genes, prior_edges = prior_edges)
+    attr(selected, "graph") <- bridge_module_edges(
+      attr(modules, "graph_W"), unique(unlist(selected)))
+  }
+
   # `harden = FALSE` is reserved for a future soft-membership mode; today the
   # engine always yields crisp modules, so hardening is a no-op either way.
   selected
+}
+
+# Edge list among selected-module genes from the blended graph W, capped for
+# interactive display (top edges by weight, bounded node set).
+#' @keywords internal
+bridge_module_edges <- function(W, genes, max_nodes = 150L, max_edges = 2000L) {
+  empty <- structure(
+    data.frame(from = character(0), to = character(0), weight = numeric(0),
+               stringsAsFactors = FALSE),
+    capped = FALSE)
+  if (is.null(W) || length(genes) < 2) return(empty)
+  genes <- intersect(genes, rownames(W))
+  if (length(genes) < 2) return(empty)
+  capped <- FALSE
+  if (length(genes) > max_nodes) {           # keep the highest-degree nodes
+    deg <- rowSums(abs(W[genes, genes, drop = FALSE]))
+    genes <- names(sort(deg, decreasing = TRUE))[seq_len(max_nodes)]
+    capped <- TRUE
+  }
+  sub <- W[genes, genes, drop = FALSE]
+  ut <- which(upper.tri(sub) & sub > 0, arr.ind = TRUE)
+  if (nrow(ut) == 0) return(empty)
+  df <- data.frame(from = genes[ut[, 1]], to = genes[ut[, 2]],
+                   weight = sub[ut], stringsAsFactors = FALSE)
+  df <- df[order(df$weight, decreasing = TRUE), , drop = FALSE]
+  if (nrow(df) > max_edges) { df <- df[seq_len(max_edges), , drop = FALSE]; capped <- TRUE }
+  structure(df, capped = capped)
 }
 
 # ── Internal glue ────────────────────────────────────────────────────────────

@@ -22,7 +22,9 @@ bridge_grouping(
   min_size = 5,
   max_size = 500,
   seed = 1,
-  verbose = TRUE
+  verbose = TRUE,
+  details = FALSE,
+  progress_file = NULL
 )
 }
 \arguments{
@@ -83,6 +85,17 @@ return fuzzy assignments without changing this signature.}
 \item{seed}{Random seed for reproducibility. Default \code{1}.}
 
 \item{verbose}{Emit progress messages. Default \code{TRUE}.}
+
+\item{details}{If \code{TRUE}, attach inspection attributes for the interactive
+Grouping tab: \code{"diagnostics"} (per-module \code{J/D/C/stability/size}),
+\code{"summary"} (candidate/prefilter/backend/prior counts, per-resolution
+sweep), and \code{"graph"} (a capped edge list of the differential network among
+selected genes). Default \code{FALSE} keeps the per-fold cross-validation path
+fast and its output unchanged.}
+
+\item{progress_file}{Optional path; when set, a \code{"step|label"} stage marker
+(steps 1-5) is written at each phase so a watcher (the Shiny Grouping tab)
+can show a live progress bar. \code{NULL} (default) is a no-op.}
 }
 \value{
 A named list of character vectors (\verb{group name -> gene symbols}),
