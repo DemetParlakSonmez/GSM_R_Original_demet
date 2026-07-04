@@ -12,7 +12,8 @@ bridge_estimate_precision(
   beta = 0.5,
   lambda2 = 0.05,
   data_type = "gaussian",
-  precision_method = "glasso"
+  precision_method = "glasso",
+  progress = NULL
 )
 }
 \arguments{

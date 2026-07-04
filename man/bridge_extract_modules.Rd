@@ -4,7 +4,14 @@
 \alias{bridge_extract_modules}
 \title{Build the blended differential graph and extract multi-resolution modules}
 \usage{
-bridge_extract_modules(Theta0, Theta1, B, resolution)
+bridge_extract_modules(
+  Theta0,
+  Theta1,
+  B,
+  resolution,
+  details = FALSE,
+  progress = NULL
+)
 }
 \arguments{
 \item{Theta0, Theta1}{Precision matrices from \code{\link[=bridge_estimate_precision]{bridge_estimate_precision()}}.}
@@ -12,6 +19,10 @@ bridge_extract_modules(Theta0, Theta1, B, resolution)
 \item{B}{Symmetric prior matrix (or \code{NULL}).}
 
 \item{resolution}{Numeric vector of Leiden resolutions to sweep.}
+
+\item{details}{If \code{TRUE}, attach the normalized blended graph \code{W} (attribute
+\code{"graph_W"}) and the per-resolution module counts (attribute \code{"res_counts"})
+for inspection.}
 }
 \value{
 A named list of character vectors: candidate modules across all
