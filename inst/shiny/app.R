@@ -403,8 +403,30 @@ ui <- page_navbar(
         box-shadow: 0 4px 16px rgba(0,0,0,0.5) !important;
       }
 
-      /* -- Hide Shiny withProgress bar (the bottom-right overlay) -- */
-      .shiny-progress-container { display: none !important; }
+      /* -- Live progress notification (withProgress): prominent + themed -- */
+      #shiny-notification-panel {
+        top: 74px !important; bottom: auto !important;
+        right: 50% !important; transform: translateX(50%);
+        width: min(560px, 92vw); max-width: 560px;
+      }
+      .shiny-notification {
+        background: #161a2e !important; color: #e8e8e8 !important;
+        border: 1px solid rgba(74,144,217,0.55) !important;
+        border-left: 4px solid #4a90d9 !important;
+        border-radius: 10px !important;
+        box-shadow: 0 8px 28px rgba(0,0,0,0.55) !important;
+        font-size: 0.92rem; padding: 14px 18px !important;
+      }
+      .shiny-progress .progress {
+        height: 14px !important; margin-top: 8px !important;
+        background: rgba(255,255,255,0.10) !important; border-radius: 7px;
+      }
+      .shiny-progress .progress-bar {
+        background-color: #4a90d9 !important;
+        transition: width .25s ease;
+      }
+      .shiny-progress .progress-message { font-weight: 700; font-size: 0.95rem; }
+      .shiny-progress .progress-detail  { color: #9fb4d6; margin-top: 2px; display:block; }
 
       /* -- Card fullscreen button: move to header bar -- */
       .bslib-full-screen-enter {
