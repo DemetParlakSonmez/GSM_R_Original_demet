@@ -12,7 +12,8 @@ bridge_score_modules(
   lambda1 = 0.25,
   lambda2 = 0.05,
   tau = 0.6,
-  n_boot = 20
+  n_boot = 20,
+  details = FALSE
 )
 }
 \arguments{
@@ -31,10 +32,14 @@ bridge_score_modules(
 \item{tau}{Bootstrap-stability threshold in \verb{[0, 1]}.}
 
 \item{n_boot}{Number of bootstrap resamples for stability.}
+
+\item{details}{If \code{TRUE}, attach a per-module \code{"diagnostics"} data.frame
+(\verb{module, size, J, D, C, stability}) alongside \code{"scores"}.}
 }
 \value{
 Named list of the selected modules (character vectors), with a
-\code{"scores"} attribute (the \code{J(M)} values).
+\code{"scores"} attribute (the \code{J(M)} values) and, when \code{details = TRUE}, a
+\code{"diagnostics"} data.frame.
 }
 \description{
 Computes \verb{J(M) = D(M) + lambda1 * C(M) - lambda2 * |M|} for each module,

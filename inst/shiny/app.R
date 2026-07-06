@@ -783,31 +783,59 @@ ui <- page_navbar(
       navset_card_tab(
         id = "g_method_tabs",
 
-        # ── Method: From file ──────────────────────────────────────────
+        # ── Method: Prior-knowledge grouping (from a file) ─────────────
         nav_panel(
-          title = "\U0001F4C1 From file", value = "g_file",
+          title = "\U0001F4DA Prior knowledge", value = "g_file",
           layout_columns(
             col_widths = c(4, 8),
             card(
               card_header("Inputs"),
               tags$p(class = "text-muted", style = "font-size:0.82rem;",
-                     "Read a predefined grouping (2-column CSV or GMT) and see how it maps onto the loaded expression matrix."),
-              fileInput("g_file_upload", "Grouping file",
-                        accept = c(".csv", ".tsv", ".gmt", ".txt")),
-              selectInput("g_file_format", "Format",
-                          choices = c("Auto-detect" = "auto",
-                                      "2-column CSV" = "csv", "GMT" = "gmt")),
-              actionButton("g_file_run", "\U0001F680 Run grouping",
+                     "Use a predefined grouping from biological knowledge — genes grouped by pathway (KEGG), function (GO), or disease association (DisGeNET). Pick a bundled example or upload your own."),
+              tags$div(style = "display:flex; align-items:center; gap:4px;",
+                tags$label("Grouping source", style = "margin:0;"),
+                help_tip("Choose a bundled example knowledge base, or upload your own gene→group file (2-column CSV, or GMT).")
+              ),
+              selectInput("g_file_source", NULL,
+                          choices = c("Example knowledge base" = "example",
+                                      "Upload my own file" = "upload")),
+              conditionalPanel(
+                condition = "input.g_file_source == 'example'",
+                selectInput("g_file_example", "Example grouping",
+                            choices = .groups_choices, selected = .default_groups)
+              ),
+              conditionalPanel(
+                condition = "input.g_file_source == 'upload'",
+                fileInput("g_file_upload", "Grouping file",
+                          accept = c(".csv", ".tsv", ".gmt", ".txt")),
+                selectInput("g_file_format", "Format",
+                            choices = c("Auto-detect" = "auto",
+                                        "2-column CSV" = "csv", "GMT" = "gmt"))
+              ),
+              actionButton("g_file_run", "\U0001F680 Load grouping",
                            class = "btn-primary w-100")
             ),
             tags$div(
               gsm_help_callout(
-                "How to run file grouping",
+                "What is prior-knowledge grouping?",
                 tagList(
-                  tags$b("1."), " In the sidebar ", tags$b("①"), ", load expression data (pick an example or upload) — or reuse what's already loaded. ",
-                  tags$b("2."), " Upload a 2-column CSV (gene, group) or GMT grouping file here. ",
-                  tags$b("3."), " Click ", tags$b("Run"), " to see the groups and how many of their genes are present in your data (coverage). ",
-                  tags$b("4."), " Click ", tags$b("Apply to pipeline"), " (sidebar ③) to use these groups in Pre-Score/GSM.")),
+                  "A curated file that maps each gene to one or more biological ",
+                  tags$b("groups"), " — e.g. a KEGG pathway, a GO term, or a DisGeNET disease. ",
+                  "It's ", tags$b("prior knowledge"), ": the groups come from biology, not from your data. ",
+                  "Later, Scoring tests each group and Modeling keeps the most predictive ones.",
+                  tags$br(), tags$br(),
+                  tags$b("Steps: "), tags$b("①"), " load expression data (sidebar). ",
+                  tags$b("②"), " pick an example knowledge base (or upload). ",
+                  tags$b("③"), " click Load — the table shows each group, its size, and ",
+                  tags$b("coverage"), " (how many of its genes are actually in your data). ",
+                  tags$b("④"), " Apply to pipeline (sidebar) to score these groups in Pre-Score/GSM.")),
+              gsm_help_callout(
+                "Reading the results",
+                tagList(
+                  tags$b("Groups / Unique genes / Median size"), " — how many groups and genes the file defines. ",
+                  tags$b("Gene coverage"), " — the share of your expression genes that appear in the grouping; low coverage means many groups reference genes you don't measure. ",
+                  "The ", tags$b("Groups table"), " lists each group with its gene count and members; the ",
+                  tags$b("histogram"), " shows the spread of group sizes.")),
               uiOutput("g_file_valueboxes"),
               card(full_screen = TRUE, card_header("Groups"),
                    DTOutput("g_file_groups_dt")),
@@ -887,14 +915,35 @@ ui <- page_navbar(
             ),
             tags$div(
               gsm_help_callout(
-                "How to run BRIDGE",
+                "What is BRIDGE?",
                 tagList(
-                  tags$b("1."), " In the sidebar ", tags$b("①"), ", load expression data (example or upload) — or reuse what's loaded. ",
-                  tags$b("2."), " Pick a ", tags$b("prior graph source"), " (an example pathway/disease file, your own upload, or 'None' for purely data-driven). ",
-                  tags$b("3."), " Keep the ", tags$b("speed pre-filter"), " on (Top-variance ~1000 genes) so it finishes fast. ",
-                  tags$b("4."), " Click ", tags$b("Run"), " — it computes on ALL samples (exploratory), with a live progress bar; ", tags$b("Stop"), " anytime. ",
-                  tags$b("5."), " Inspect the modules/network, then ", tags$b("Apply to pipeline"),
-                  " (sidebar ③) — GSM re-derives it per training fold.")),
+                  tags$b("BRIDGE discovers the groups from YOUR data"), " instead of taking them from a file. ",
+                  "It learns how genes co-vary in each class, finds where those relationships ", tags$b("differ"),
+                  " between the two classes (e.g. tumor vs normal), and turns those differential sub-networks into ", tags$b("modules"), " (groups). ",
+                  "A ", tags$b("prior graph"), " (an optional pathway/disease file) nudges biologically related genes together — hence ",
+                  tags$em("Biologically-Regularized Interaction-Differential Grouping Engine"), ".",
+                  tags$br(), tags$br(),
+                  tags$b("Use it when"), " you want data-driven, condition-specific groups rather than fixed pathway definitions. ",
+                  "It runs here on ", tags$b("all samples"), " for exploration; once applied, GSM re-derives it ", tags$b("per training fold"), " so the evaluation stays honest (no leakage).")),
+              gsm_help_callout(
+                "How to run it",
+                tagList(
+                  tags$b("①"), " load expression data (sidebar). ",
+                  tags$b("②"), " pick a ", tags$b("prior source"), " (example pathway/disease file, upload, or 'None'). ",
+                  tags$b("③"), " keep ", tags$b("Speed pre-filter"), " = Top-variance and ", tags$b("Estimator"), " = mb / fast so it finishes in seconds. ",
+                  tags$b("④"), " click ", tags$b("Run"), " — watch the live progress; ", tags$b("Stop"), " anytime. ",
+                  tags$b("⑤"), " inspect, then ", tags$b("Apply to pipeline"), " (sidebar ③).")),
+              gsm_help_callout(
+                "Reading the results",
+                tagList(
+                  tags$b("Modules table — J = D + λ₁·C − λ₂·|M|"), " ranks each module by an overall score, where:",
+                  tags$ul(style = "margin:4px 0 0 0;",
+                    tags$li(tags$b("D"), " = discrimination — how well the module separates the two classes (higher = more predictive)."),
+                    tags$li(tags$b("C"), " = prior cohesion — how much the module agrees with the prior graph (biological plausibility)."),
+                    tags$li(tags$b("stability"), " = how often the module survives when the samples are resampled (1.0 = very robust)."),
+                    tags$li(tags$b("size"), " = number of genes; |M| is penalized so huge modules don't win by size alone.")),
+                  tags$b("Diagnostics"), " show how many genes/candidates went in and which backend ran. The ",
+                  tags$b("network"), " draws the differential connections, coloured by module.")),
               uiOutput("g_bridge_progress"),
               uiOutput("g_bridge_valueboxes"),
               uiOutput("g_bridge_diag_card"),
@@ -1057,6 +1106,16 @@ ui <- page_navbar(
       sidebar = sidebar(
         title = "\U2699\UFE0F GSM — Settings",
         width = 340,
+
+        # ── Which grouping to score (from the standalone Grouping component) ──
+        tags$div(style = "display:flex; align-items:center; gap:4px;",
+          tags$label("\U0001F9E9 Grouping to score", style = "font-weight:600;"),
+          help_tip("The grouping that Pre-Score/GSM will use. Prepare groupings in the Grouping (G) tab (Prior knowledge or BRIDGE); pick which one to score here. This is the active pipeline grouping.")
+        ),
+        selectInput("gsm_grouping_choice", NULL, choices = NULL),
+        uiOutput("gsm_grouping_note"),
+        tags$hr(),
+
         tags$div(style = "display:flex; align-items:center; gap:4px;",
           tags$label("Classifier"),
           help_tip("ML algorithm for group scoring. RF is robust and fast. SVM works well for small samples. KNN is simple. XGBoost for complex patterns.")
@@ -3814,14 +3873,19 @@ server <- function(input, output, session) {
                      nrow(ed$expr), nlevels(ed$labels)))
   })
 
-  # ── From-file method: run + render ───────────────────────────────────────
+  # ── Prior-knowledge (file) method: run + render ──────────────────────────
   observeEvent(input$g_file_run, {
     req(rv$expr_data)
-    if (is.null(input$g_file_upload))
-      return(showNotification("⚠️ Upload a grouping file first.", type = "warning"))
+    src <- input$g_file_source %||% "example"
     tryCatch({
-      groups <- compute_grouping("file", file = input$g_file_upload$datapath,
-                                 format = input$g_file_format)
+      groups <- if (src == "example") {
+        .g_read_example_groups(input$g_file_example %||% "")
+      } else {
+        if (is.null(input$g_file_upload))
+          stop("Upload a grouping file, or choose an example.")
+        compute_grouping("file", file = input$g_file_upload$datapath,
+                         format = input$g_file_format)
+      }
       rv$g_file <- list(groups = groups)
       showNotification(sprintf("✅ Loaded %d group(s).", length(groups)), type = "message")
     }, error = function(e)
@@ -4028,37 +4092,40 @@ server <- function(input, output, session) {
   })
 
   # ── Apply the active method's grouping to the pipeline ───────────────────
-  observeEvent(input$g_apply, {
-    if (is.null(rv$expr_data))
-      return(showNotification("⚠️ Load expression data first.", type = "warning"))
+  # Commit one of the prepared groupings (G-tab results) as the active pipeline
+  # dataset. Shared by the G-tab "Apply" button and the GSM-tab selector.
+  .commit_grouping <- function(which, notify = TRUE) {
+    if (is.null(rv$expr_data)) {
+      showNotification("⚠️ Load expression data first (Data or Grouping tab).",
+                       type = "warning"); return(invisible(FALSE)) }
     ed <- rv$expr_data
-    method_tab <- input$g_method_tabs %||% "g_file"
-    tryCatch({
-      ds <- if (identical(method_tab, "g_bridge")) {
-        validate(need(!is.null(rv$g_bridge), "Run BRIDGE first."))
-        # Commit the deferred recipe (leakage-free): groups re-derived per fold.
+    ds <- tryCatch({
+      if (identical(which, "g_bridge")) {
+        if (is.null(rv$g_bridge)) { showNotification("⚠️ Run BRIDGE in the Grouping tab first.", type = "warning"); return(NULL) }
         gsm_dataset(ed$expr, ed$labels, groups = list(),
                     min_group_size = input$g_bridge_min_size %||% 5,
                     max_group_size = input$g_bridge_max_size %||% 500,
                     grouping_spec = rv$g_bridge$spec)
       } else {
-        validate(need(!is.null(rv$g_file), "Run a file grouping first."))
+        if (is.null(rv$g_file)) { showNotification("⚠️ Run a Prior-knowledge grouping in the Grouping tab first.", type = "warning"); return(NULL) }
         gsm_dataset(ed$expr, ed$labels, rv$g_file$groups,
                     min_group_size = input$min_group_size %||% 5,
                     max_group_size = input$max_group_size %||% 500)
       }
-      rv$dataset <- ds
-      rv$groups  <- ds$groups
-      rv$loaded  <- TRUE
-      rv$dataset_name <- rv$dataset_name %||% "dataset"
-      # Reset downstream so Pre-Score / GSM don't show stale results.
-      rv$collapsed <- FALSE; rv$prescored <- FALSE; rv$scored <- FALSE
-      rv$prescore_groups <- NULL; rv$score_results <- NULL; rv$mccv_results <- NULL
-      showNotification(sprintf("✅ Applied %s grouping to the pipeline.",
-                               if (identical(method_tab, "g_bridge")) "BRIDGE (per-fold)" else "file"),
-                       type = "message")
-    }, error = function(e)
-      showNotification(paste("❌", e$message), type = "error", duration = 10))
+    }, error = function(e) { showNotification(paste("❌", e$message), type = "error", duration = 10); NULL })
+    if (is.null(ds)) return(invisible(FALSE))
+    rv$dataset <- ds; rv$groups <- ds$groups; rv$loaded <- TRUE
+    rv$dataset_name <- rv$dataset_name %||% "dataset"
+    rv$collapsed <- FALSE; rv$prescored <- FALSE; rv$scored <- FALSE
+    rv$prescore_groups <- NULL; rv$score_results <- NULL; rv$mccv_results <- NULL
+    if (notify) showNotification(sprintf("✅ Using %s grouping for the pipeline.",
+      if (identical(which, "g_bridge")) "BRIDGE (per-fold)" else "prior-knowledge"),
+      type = "message")
+    invisible(TRUE)
+  }
+
+  observeEvent(input$g_apply, {
+    .commit_grouping(input$g_method_tabs %||% "g_file")
   })
   output$g_active_status <- renderUI({
     val <- if (is.null(rv$dataset)) "— none applied yet —"
@@ -4072,6 +4139,52 @@ server <- function(input, output, session) {
       tags$div(class = "text-muted", style = "font-size:0.78rem; text-transform:uppercase;",
                "Active pipeline grouping"),
       tags$div(style = "font-weight:700; font-size:1.0rem; color:#4a90d9;", val))
+  })
+
+  # ── GSM tab: choose which prepared grouping to score ─────────────────────
+  # Populate the selector from the groupings prepared in the Grouping (G) tab.
+  observe({
+    ch <- character(0)
+    if (!is.null(rv$g_file))
+      ch <- c(ch, stats::setNames("g_file",
+        sprintf("\U0001F4DA Prior knowledge — %d groups", length(rv$g_file$groups))))
+    if (!is.null(rv$g_bridge))
+      ch <- c(ch, stats::setNames("g_bridge",
+        sprintf("\U0001F309 BRIDGE — %d modules (re-derived per fold)", length(rv$g_bridge$groups))))
+    if (length(ch) == 0)
+      ch <- c("— prepare a grouping in the Grouping tab —" = "")
+    cur <- isolate(input$gsm_grouping_choice)
+    sel <- if (!is.null(cur) && cur %in% ch) cur else {
+      gm <- isolate(rv$dataset$params$grouping_method) %||% ""
+      if (gm == "bridge" && "g_bridge" %in% ch) "g_bridge"
+      else if (gm == "file" && "g_file" %in% ch) "g_file"
+      else ch[[1]]
+    }
+    updateSelectInput(session, "gsm_grouping_choice", choices = ch, selected = sel)
+  })
+
+  # Selecting a grouping here commits it as the active pipeline grouping.
+  observeEvent(input$gsm_grouping_choice, {
+    choice <- input$gsm_grouping_choice
+    if (is.null(choice) || !nzchar(choice)) return()
+    gm <- rv$dataset$params$grouping_method %||% ""
+    already <- (choice == "g_file" && gm == "file") ||
+               (choice == "g_bridge" && gm == "bridge")
+    if (already) return()          # already the active grouping — nothing to do
+    .commit_grouping(choice)
+  }, ignoreInit = TRUE)
+
+  output$gsm_grouping_note <- renderUI({
+    choice <- input$gsm_grouping_choice %||% ""
+    if (!nzchar(choice))
+      return(tags$div(class = "text-warning", style = "font-size:0.78rem;",
+                      "No grouping prepared yet — run one in the Grouping tab."))
+    if (choice == "g_bridge")
+      tags$div(class = "text-muted", style = "font-size:0.78rem;",
+               "BRIDGE is re-derived on each training fold (leakage-free). Use the mb estimator + a pre-filter in the Grouping tab so each fold is fast.")
+    else
+      tags$div(class = "text-muted", style = "font-size:0.78rem;",
+               "Fixed prior-knowledge groups (same every fold).")
   })
 
   output$rra_group_table <- renderDT({
