@@ -14,6 +14,10 @@ NULL
 #' @param fold Integer fold index (also offsets the seed: `seed + fold`).
 #' @param train_ratio,pre_score_method,pre_score_top_percent,score_method,model_method,score_args,model_args,seed
 #'   See [run_mccv()].
+#' @param top_n,shave,fdr_alpha,shave_method,shave_k,normalize See [run_mccv()].
+#' @param progress_file Optional path; when set, a one-line stage marker is
+#'   written at each phase so a watcher (the Shiny app) can show live per-fold
+#'   progress. `NULL` (default) is a no-op.
 #' @return A list with `fold`, `status` ("success"/"error"), and on success
 #'   `metrics`, `features_count`, `n_groups`, `group_accuracies`, `pre_scores`
 #'   (sorted pre-scoring scores for all groups), and `importance` (per-gene RF
@@ -25,9 +29,16 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
                           score_args = list(), model_args = list(),
                           top_n = 10, shave = TRUE, fdr_alpha = 0.05,
                           shave_method = "fdr", shave_k = 100,
-                          normalize = FALSE, seed = 42) {
+                          normalize = FALSE, seed = 42, progress_file = NULL) {
   fold_seed <- seed + fold
+  # Stream a one-line stage marker so the Shiny app can show live per-fold
+  # progress even though this runs in a forked worker. No-op when NULL.
+  mp <- function(stage) {
+    if (is.null(progress_file)) return(invisible())
+    try(writeLines(stage, progress_file), silent = TRUE)
+  }
   tryCatch({
+    mp("starting")
     split <- split_train_test(dataset$labels, ratio = train_ratio, seed = fold_seed)
 
     # Optional leakage-free z-score: fit mean/sd on TRAIN, apply to all columns.
@@ -41,6 +52,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     ds <- dataset
     if (!is.null(dataset$grouping_spec) &&
         identical(dataset$grouping_spec$method, "bridge")) {
+      mp("deriving BRIDGE groups (training samples)")
       ds$groups <- grouping_for_fold(dataset, split$train, expr = expr_use,
                                      fold_seed = fold_seed)
       if (length(ds$groups) == 0)
@@ -48,6 +60,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     }
 
     # Phase I — training-only gene shaving (Welch t-test; FDR or top-k), group.
+    mp("gene shaving")
     keep_genes <- if (isTRUE(shave))
       shave_genes(expr_use, ds$labels, split$train, alpha = fdr_alpha,
                   method = shave_method, top_k = shave_k)
@@ -63,6 +76,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
       stop("No groups survived gene shaving (FDR ", fdr_alpha, ").")
 
     # Phase II — SCORE each candidate (mean F1, k-fold CV, TRAIN only) -> rank.
+    mp(sprintf("scoring %d groups", length(candidates)))
     scores <- vapply(names(candidates), function(name) {
       do.call(score_group_train, c(
         list(expr = expr_use, labels = ds$labels,
@@ -73,6 +87,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     ranked <- names(sort(scores, decreasing = TRUE))
 
     # Phase III — ACCUMULATIVE MODELING top-1..K; skip k that add no new genes.
+    mp("building models")
     K <- min(top_n, length(ranked))
     acc_rows <- list(); best_model <- NULL; prev_features <- 0L
     for (k in seq_len(K)) {
@@ -98,6 +113,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     }
     accumulative <- do.call(rbind, acc_rows)
     best_k <- best_model$.k
+    mp("done")
 
     list(
       fold = fold,
@@ -121,6 +137,9 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
         universe = intersect(unique(unlist(ds$groups)), keep_genes))
     )
   }, error = function(e) {
+    try(if (!is.null(progress_file))
+      writeLines(paste0("error: ", conditionMessage(e)), progress_file),
+      silent = TRUE)
     list(fold = fold, status = "error", error_message = conditionMessage(e))
   })
 }
