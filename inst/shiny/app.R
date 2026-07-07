@@ -3465,12 +3465,22 @@ server <- function(input, output, session) {
   # Single Fold Renderers: Group Scores Table
   output$score_table <- renderDT({
     req(rv$score_results)
+    .members <- function(g) {
+      genes <- rv$score_results[[g]]$genes %||% rv$prescore_groups[[g]] %||%
+               (if (!is.null(rv$dataset)) rv$dataset$groups[[g]] else NULL)
+      genes
+    }
+    gnames <- names(rv$score_results)
     df <- data.frame(
       Rank     = seq_along(rv$score_results),
-      Group    = names(rv$score_results),
+      Group    = gnames,
       Accuracy = vapply(rv$score_results, \(x) round(x$accuracy, 4), numeric(1)),
-      Genes    = vapply(names(rv$score_results),
-                        \(g) length(rv$prescore_groups[[g]]), integer(1)),
+      Genes    = vapply(gnames, \(g) length(.members(g)), integer(1)),
+      Members  = vapply(gnames, \(g) {
+        gg <- .members(g); if (is.null(gg)) return("—")
+        s <- paste(utils::head(gg, 20), collapse = ", ")
+        if (length(gg) > 20) paste0(s, ", … (", length(gg), " total)") else s
+      }, character(1)),
       stringsAsFactors = FALSE
     )
     df <- df[order(-df$Accuracy), ]
@@ -4088,16 +4098,29 @@ server <- function(input, output, session) {
       }
     }
     
+    # Member genes per group. For fixed (prior-knowledge) groupings the group
+    # name maps to a constant gene set; for BRIDGE the groups are re-derived per
+    # fold (fold-local names), so a single member list is not defined.
+    grp_members <- if (!is.null(rv$dataset) && length(rv$dataset$groups) > 0)
+      rv$dataset$groups else NULL
+
     summary_list <- list()
     for (gname in names(group_performance)) {
       perf <- group_performance[[gname]]
+      genes <- if (!is.null(grp_members)) grp_members[[gname]] else NULL
+      gene_txt <- if (!is.null(genes)) {
+        s <- paste(utils::head(genes, 20), collapse = ", ")
+        if (length(genes) > 20) paste0(s, ", … (", length(genes), " total)") else s
+      } else "(BRIDGE: re-derived per fold — see the gene consensus table)"
       summary_list[[gname]] <- data.frame(
         Group = gname,
+        N_genes = if (!is.null(genes)) length(genes) else NA_integer_,
         Folds_Evaluated = length(perf$accuracies),
         Top_10_Appearances = perf$in_top_10,
         Appearance_Rate = round((perf$in_top_10 / n_success) * 100, 1),
         Mean_Accuracy = round(mean(perf$accuracies) * 100, 2),
         Mean_Rank = round(mean(perf$ranks), 1),
+        Genes = gene_txt,
         stringsAsFactors = FALSE
       )
     }
