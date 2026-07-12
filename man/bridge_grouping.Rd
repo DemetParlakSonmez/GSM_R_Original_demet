@@ -24,6 +24,8 @@ bridge_grouping(
   seed = 1,
   verbose = TRUE,
   details = FALSE,
+  graph_max_nodes = 150L,
+  graph_max_edges = 2000L,
   progress_file = NULL
 )
 }
@@ -92,6 +94,12 @@ Grouping tab: \code{"diagnostics"} (per-module \code{J/D/C/stability/size}),
 sweep), and \code{"graph"} (a capped edge list of the differential network among
 selected genes). Default \code{FALSE} keeps the per-fold cross-validation path
 fast and its output unchanged.}
+
+\item{graph_max_nodes, graph_max_edges}{Caps on the \code{"graph"} edge list emitted
+under \code{details = TRUE}. The defaults keep the interactive network plot
+responsive. The \code{"gnn"} classifier raises them (via
+\code{\link[=grouping_for_fold]{grouping_for_fold()}}\code{(with_graph = TRUE)}) because it convolves over the
+graph and a truncated one would leave genes with no edges.}
 
 \item{progress_file}{Optional path; when set, a \code{"step|label"} stage marker
 (steps 1-5) is written at each phase so a watcher (the Shiny Grouping tab)

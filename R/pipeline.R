@@ -312,8 +312,26 @@ run_pipeline <- function(params = NULL, outdir = ".", discover = TRUE, ...) {
     },
     knn = list(k = p$knn_k),
     xgb = list(),
+    mlp = list(hidden = .parse_hidden(p$mlp_hidden), dropout = p$nn_dropout,
+               epochs = p$nn_epochs, lr = p$nn_lr),
+    # `graph` is not set here: MCCV injects BRIDGE's per-fold differential
+    # network at run time (see mccv_run_fold()). Absent that, the GNN builds a
+    # train-only correlation graph itself.
+    gnn = list(hidden = as.integer(p$gnn_hidden), dropout = p$nn_dropout,
+               epochs = p$nn_epochs, lr = p$nn_lr,
+               cor_threshold = p$gnn_cor_threshold),
     list()
   )
+}
+
+# "64,32" (YAML/GUI) or c(64, 32) -> integer vector of hidden-layer widths.
+#' @keywords internal
+.parse_hidden <- function(x) {
+  if (is.null(x)) return(c(64L, 32L))
+  if (is.numeric(x)) return(as.integer(x))
+  v <- suppressWarnings(as.integer(trimws(strsplit(as.character(x), ",")[[1]])))
+  v <- v[is.finite(v) & v > 0]
+  if (length(v) == 0) c(64L, 32L) else v
 }
 
 #' Format elapsed seconds as human-readable string
@@ -355,6 +373,12 @@ gsm_resolve_params <- function(cfg = list()) {
     svm_cost           = as.numeric(cfg$svm_cost %||% 1),
     svm_gamma          = cfg$svm_gamma          %||% "auto",
     knn_k              = as.integer(cfg$knn_k %||% 5),
+    mlp_hidden         = cfg$mlp_hidden         %||% "64,32",
+    gnn_hidden         = as.integer(cfg$gnn_hidden %||% 32),
+    gnn_cor_threshold  = as.numeric(cfg$gnn_cor_threshold %||% 0.3),
+    nn_dropout         = as.numeric(cfg$nn_dropout %||% 0.3),
+    nn_epochs          = as.integer(cfg$nn_epochs %||% 100),
+    nn_lr              = as.numeric(cfg$nn_lr %||% 0.01),
     shave_genes        = as.logical(cfg$shave_genes %||% TRUE),
     fdr_alpha          = as.numeric(cfg$fdr_alpha %||% 0.05),
     normalize_z        = as.logical(cfg$normalize_z %||% FALSE),

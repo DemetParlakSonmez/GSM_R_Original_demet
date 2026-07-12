@@ -36,6 +36,8 @@ Suggests:
     JGL,
     e1071,
     xgboost,
+    torch,
+    class,
     limma,
     GSVA,
     caret,

@@ -50,13 +50,24 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.7,
     # grouping this returns dataset$groups unchanged. `ds` is used everywhere
     # downstream so the rest of the fold is agnostic to how groups were made.
     ds <- dataset
+    # The "gnn" classifier convolves over a gene-gene graph. When the grouping is
+    # BRIDGE, hand it BRIDGE's own differential network for THIS fold (derived
+    # from training samples only, so still leakage-free); otherwise the GNN falls
+    # back to a train-only correlation graph it builds itself.
+    need_graph <- score_method == "gnn" || model_method == "gnn"
     if (!is.null(dataset$grouping_spec) &&
         identical(dataset$grouping_spec$method, "bridge")) {
       mp("deriving BRIDGE groups (training samples)")
       ds$groups <- grouping_for_fold(dataset, split$train, expr = expr_use,
-                                     fold_seed = fold_seed)
+                                     fold_seed = fold_seed,
+                                     with_graph = need_graph)
       if (length(ds$groups) == 0)
         stop("BRIDGE derived no groups on this fold's training data.")
+      fold_graph <- attr(ds$groups, "graph")
+      if (need_graph && !is.null(fold_graph)) {
+        score_args$graph <- fold_graph
+        model_args$graph <- fold_graph
+      }
     }
 
     # Phase I — training-only gene shaving (Welch t-test; FDR or top-k), group.

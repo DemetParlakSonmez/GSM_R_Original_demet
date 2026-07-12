@@ -544,6 +544,11 @@ bridge_score_modules <- function(modules, X_gs, y, B, lambda1 = 0.25,
 #'   sweep), and `"graph"` (a capped edge list of the differential network among
 #'   selected genes). Default `FALSE` keeps the per-fold cross-validation path
 #'   fast and its output unchanged.
+#' @param graph_max_nodes,graph_max_edges Caps on the `"graph"` edge list emitted
+#'   under `details = TRUE`. The defaults keep the interactive network plot
+#'   responsive. The `"gnn"` classifier raises them (via
+#'   [grouping_for_fold()]`(with_graph = TRUE)`) because it convolves over the
+#'   graph and a truncated one would leave genes with no edges.
 #' @return A named list of character vectors (`group name -> gene symbols`),
 #'   identical in shape to [read_groups()] output. Carries a `"scores"`
 #'   attribute with each module's `J(M)`. If no module passes the filters, a
@@ -579,6 +584,7 @@ bridge_grouping <- function(X, y, B = NULL,
                             max_genes = NULL,
                             harden = TRUE, min_size = 5, max_size = 500,
                             seed = 1, verbose = TRUE, details = FALSE,
+                            graph_max_nodes = 150L, graph_max_edges = 2000L,
                             progress_file = NULL) {
   data_type <- match.arg(data_type)
   precision_method <- match.arg(precision_method)
@@ -707,7 +713,8 @@ bridge_grouping <- function(X, y, B = NULL,
       res_counts = attr(modules, "res_counts"),
       prior_genes = prior_genes, prior_edges = prior_edges)
     attr(selected, "graph") <- bridge_module_edges(
-      attr(modules, "graph_W"), unique(unlist(selected)))
+      attr(modules, "graph_W"), unique(unlist(selected)),
+      max_nodes = graph_max_nodes, max_edges = graph_max_edges)
   }
 
   # `harden = FALSE` is reserved for a future soft-membership mode; today the

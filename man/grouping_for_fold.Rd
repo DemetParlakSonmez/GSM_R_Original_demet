@@ -4,7 +4,13 @@
 \alias{grouping_for_fold}
 \title{Derive the groups to use for one cross-validation fold}
 \usage{
-grouping_for_fold(dataset, train_idx, expr = NULL, fold_seed = NULL)
+grouping_for_fold(
+  dataset,
+  train_idx,
+  expr = NULL,
+  fold_seed = NULL,
+  with_graph = FALSE
+)
 }
 \arguments{
 \item{dataset}{A \code{gsm_dataset}. If \code{dataset$grouping_spec} is \code{NULL} or its
@@ -19,6 +25,11 @@ fold. Only these columns of the expression matrix are used to derive groups.}
 
 \item{fold_seed}{Optional integer seed so groups are reproducible per fold and
 vary across folds. Defaults to the spec's seed (or \code{1}).}
+
+\item{with_graph}{If \code{TRUE}, also attach BRIDGE's differential network for
+this fold as a \code{"graph"} attribute (an edge list) on the returned groups.
+The \code{"gnn"} classifier convolves over it; every other backend ignores it.
+Defaults to \code{FALSE}, which keeps the per-fold path fast.}
 }
 \value{
 A named list of character vectors (\verb{group name -> gene symbols}).
