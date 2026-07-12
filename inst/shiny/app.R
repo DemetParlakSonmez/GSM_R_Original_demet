@@ -77,7 +77,36 @@ value_box_ui <- function(value, label, icon = NULL) {
 # Friendly classifier name + a "key = value" string of its hyperparameters.
 classifier_label <- function(method) {
   switch(method, rf = "Random Forest", svm = "Support Vector Machine",
-         knn = "K-Nearest Neighbors", xgb = "XGBoost", method)
+         knn = "K-Nearest Neighbors", xgb = "XGBoost",
+         mlp = "Neural Network (MLP)", gnn = "Graph Neural Network (GCN)",
+         method)
+}
+
+# The classifier dropdowns (scoring, modeling, permutation, batch) all offer the
+# same backends, so they are built from one list rather than five copies.
+CLASSIFIER_CHOICES <- c("Random Forest" = "rf",
+                        "Support Vector Machine" = "svm",
+                        "K-Nearest Neighbors" = "knn",
+                        "XGBoost" = "xgb",
+                        "Neural Network (MLP)" = "mlp",
+                        "Graph Neural Network (GCN)" = "gnn")
+
+# Hyperparameter args for the torch-backed classifiers. `graph` is deliberately
+# absent: MCCV injects BRIDGE's per-fold differential network at run time, and
+# without one the GNN builds a train-only correlation graph itself.
+build_nn_args <- function(input, method) {
+  common <- list(dropout = input$nn_dropout %||% 0.3,
+                 epochs  = input$nn_epochs  %||% 100,
+                 lr      = input$nn_lr      %||% 0.01)
+  if (method == "mlp") {
+    hid <- suppressWarnings(as.integer(trimws(strsplit(
+      input$mlp_hidden %||% "64,32", ",")[[1]])))
+    hid <- hid[is.finite(hid) & hid > 0]
+    c(list(hidden = if (length(hid)) hid else c(64L, 32L)), common)
+  } else {
+    c(list(hidden = as.integer(input$gnn_hidden %||% 32),
+           cor_threshold = input$gnn_cor_threshold %||% 0.3), common)
+  }
 }
 
 # Assemble BRIDGE hyperparameters from prefixed inputs, so the Data tab
@@ -1083,10 +1112,7 @@ ui <- page_navbar(
           accordion_panel(
             "Classifier", icon = tags$span("\U0001F916"),
             selectInput("score_method", "Group scorer",
-                        choices = c("Random Forest" = "rf",
-                                    "Support Vector Machine" = "svm",
-                                    "K-Nearest Neighbors" = "knn",
-                                    "XGBoost" = "xgb")),
+                        choices = CLASSIFIER_CHOICES),
             conditionalPanel("input.score_method == 'rf'",
               numericInput("rf_ntree", "Number of Trees (ntree)", value = 500, min = 1, step = 50)),
             conditionalPanel("input.score_method == 'svm'",
@@ -1097,7 +1123,30 @@ ui <- page_navbar(
               numericInput("svm_cost", "Cost (C)", value = 1, min = 0.001, step = 0.5),
               numericInput("svm_gamma", "Gamma (non-linear only)", value = 0.1, min = 0.0001, step = 0.01)),
             conditionalPanel("input.score_method == 'knn'",
-              numericInput("knn_k", "Neighbors (k)", value = 3, min = 1, max = 20, step = 1))
+              numericInput("knn_k", "Neighbors (k)", value = 3, min = 1, max = 20, step = 1)),
+
+            # ── Deep learning (torch): MLP and GNN ──────────────────────────
+            conditionalPanel(
+              "input.score_method == 'mlp' || input.score_method == 'gnn' ||
+               input.model_method == 'mlp' || input.model_method == 'gnn'",
+              tags$div(class = "text-muted small", style = "margin-bottom:6px;",
+                       "Needs the 'torch' package. These models have far more ",
+                       "capacity than typical transcriptomic sample sizes — ",
+                       "treat Random Forest / XGBoost as the baseline to beat."),
+              conditionalPanel("input.score_method == 'mlp' || input.model_method == 'mlp'",
+                tags$div(style = "display:flex; align-items:center; gap:4px;",
+                  textInput("mlp_hidden", "Hidden layers (widths)", value = "64,32"),
+                  help_tip("Comma-separated layer widths. '64,32' = two hidden layers of 64 then 32 units."))),
+              conditionalPanel("input.score_method == 'gnn' || input.model_method == 'gnn'",
+                numericInput("gnn_hidden", "GCN hidden width", value = 32, min = 4, max = 256, step = 4),
+                tags$div(style = "display:flex; align-items:center; gap:4px;",
+                  numericInput("gnn_cor_threshold", "Fallback graph |cor| cutoff",
+                               value = 0.3, min = 0, max = 0.99, step = 0.05),
+                  help_tip("The GNN convolves over BRIDGE's differential network when a BRIDGE grouping is active. With a file-based grouping (KEGG/GO/DisGeNET) there is no such network, so it builds a gene-gene graph from training-sample correlation and keeps edges above this cutoff."))),
+              numericInput("nn_epochs", "Training epochs", value = 100, min = 10, max = 2000, step = 10),
+              numericInput("nn_lr", "Learning rate", value = 0.01, min = 0.0001, max = 1, step = 0.005),
+              numericInput("nn_dropout", "Dropout", value = 0.3, min = 0, max = 0.9, step = 0.05)
+            )
           ),
 
           accordion_panel(
@@ -1132,9 +1181,8 @@ ui <- page_navbar(
               sliderInput("mccv_cores", "CPU Cores", min = 1, max = parallel::detectCores(),
                           value = max(1, parallel::detectCores() - 1), step = 1),
               selectInput("model_method", "Final Modeling Classifier",
-                          choices = c("Same as Scoring" = "same", "Random Forest" = "rf",
-                                      "Support Vector Machine" = "svm", "K-Nearest Neighbors" = "knn",
-                                      "XGBoost" = "xgb"), selected = "same"),
+                          choices = c("Same as Scoring" = "same", CLASSIFIER_CHOICES),
+                          selected = "same"),
               sliderInput("mccv_train_ratio", "Training Ratio", min = 0.5, max = 0.9, value = 0.7, step = 0.05))
           )
         ),
@@ -1499,12 +1547,8 @@ ui <- page_navbar(
         fileInput("batch_groups_upload", "…or upload grouping file",
                   accept = c(".csv", ".tsv", ".gmt", ".txt")),
         tags$hr(),
-        field_label("Classifier", "Machine-learning algorithm used to score each group and build models. Random Forest is robust and gives gene importances; SVM suits small samples; KNN is simple; XGBoost handles complex patterns. Applied to every dataset."),
-        selectInput("bp_score_method", NULL,
-                    choices = c("Random Forest" = "rf",
-                                "Support Vector Machine" = "svm",
-                                "K-Nearest Neighbors" = "knn",
-                                "XGBoost" = "xgb")),
+        field_label("Classifier", "Machine-learning algorithm used to score each group and build models. Random Forest is robust and gives gene importances; SVM suits small samples; KNN is simple; XGBoost handles complex patterns. The Neural Network (MLP) and Graph Neural Network (GCN) need the 'torch' package — the GCN convolves over BRIDGE's differential network, or a correlation graph with file-based groupings. Applied to every dataset."),
+        selectInput("bp_score_method", NULL, choices = CLASSIFIER_CHOICES),
         field_label("Pre-scoring", "Fast statistical test that ranks groups so only the strongest go to ML scoring. Computed on the TRAINING split of each fold (no leakage). ANOVA/limma combine per-gene p-values; Fisher (chi-square) calibrates for group size; Empirical Brown also corrects gene-gene correlation; CAMERA is a competitive 2-class test; GSVA scores single-sample enrichment; None keeps all groups."),
         selectInput("bp_prescore_method", NULL,
                     choices = c("ANOVA" = "anova", "limma (moderated)" = "limma",
@@ -1528,8 +1572,7 @@ ui <- page_navbar(
             numericInput("bp_n_top_groups", NULL, value = 10, min = 1))),
         field_label("Final modeling", "Classifier used to build the final accumulative model from the top-ranked groups. 'Same as scoring' reuses the classifier above; otherwise pick a different algorithm for the modeling step."),
         selectInput("bp_model_method", NULL,
-                    choices = c("Same as scoring" = "same", "Random Forest" = "rf",
-                                "SVM" = "svm", "KNN" = "knn", "XGBoost" = "xgb")),
+                    choices = c("Same as scoring" = "same", CLASSIFIER_CHOICES)),
         layout_columns(col_widths = c(6, 6),
           tags$div(style = "display:flex; align-items:center; gap:4px;",
             checkboxInput("bp_shave", "Gene shaving", value = TRUE),
@@ -2441,6 +2484,8 @@ server <- function(input, output, session) {
       score_args <- list(k = input$knn_k)
     } else if (input$score_method == "xgb") {
       score_args <- list(nrounds = 100)
+    } else if (input$score_method %in% c("mlp", "gnn")) {
+      score_args <- build_nn_args(input, input$score_method)
     }
 
     tryCatch({
@@ -2603,6 +2648,8 @@ server <- function(input, output, session) {
           model_args <- list(k = input$knn_k)
         } else if (m_method == "xgb") {
           model_args <- list(nrounds = 100)
+        } else if (m_method %in% c("mlp", "gnn")) {
+          model_args <- build_nn_args(input, m_method)
         }
 
         # Scope: "all" groups => keep 100% in each fold's pre-scoring (no filter).

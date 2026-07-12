@@ -37,7 +37,10 @@ build_model <- function(expr, labels, top_groups, train_idx,
     svm = build_model_svm,
     knn = build_model_knn,
     xgb = build_model_xgb,
-    stop("Unknown modeling method: '", method, "'. Available: 'rf', 'svm', 'knn', 'xgb'.")
+    mlp = build_model_mlp,
+    gnn = build_model_gnn,
+    stop("Unknown modeling method: '", method, "'. Available: ",
+         "'rf', 'svm', 'knn', 'xgb', 'mlp', 'gnn'.")
   )
   fn(expr, labels, top_groups, train_idx, ...)
 }

@@ -108,9 +108,14 @@ compute_grouping <- function(method = c("file", "bridge"),
 #'   `dataset$expr`.
 #' @param fold_seed Optional integer seed so groups are reproducible per fold and
 #'   vary across folds. Defaults to the spec's seed (or `1`).
+#' @param with_graph If `TRUE`, also attach BRIDGE's differential network for
+#'   this fold as a `"graph"` attribute (an edge list) on the returned groups.
+#'   The `"gnn"` classifier convolves over it; every other backend ignores it.
+#'   Defaults to `FALSE`, which keeps the per-fold path fast.
 #' @return A named list of character vectors (`group name -> gene symbols`).
 #' @export
-grouping_for_fold <- function(dataset, train_idx, expr = NULL, fold_seed = NULL) {
+grouping_for_fold <- function(dataset, train_idx, expr = NULL, fold_seed = NULL,
+                              with_graph = FALSE) {
   spec <- dataset$grouping_spec
   if (is.null(spec) || is.null(spec$method) || spec$method != "bridge") {
     return(dataset$groups)  # fixed / file-based grouping: unchanged
@@ -128,6 +133,15 @@ grouping_for_fold <- function(dataset, train_idx, expr = NULL, fold_seed = NULL)
   if (!is.null(spec$max_genes))        args$max_genes        <- spec$max_genes
   if (!is.null(fold_seed))             args$seed             <- fold_seed
   if (is.null(args$verbose))           args$verbose          <- FALSE
+  # `details = TRUE` is what makes bridge_grouping() attach the "graph" attribute
+  # (the blended differential network). Only pay for it when a caller wants it.
+  # The display caps are lifted here: a GNN convolving over a truncated graph
+  # would see isolated genes with self-loops only.
+  if (isTRUE(with_graph)) {
+    args$details         <- TRUE
+    args$graph_max_nodes <- Inf
+    args$graph_max_edges <- Inf
+  }
 
   do.call(bridge_grouping, args)
 }

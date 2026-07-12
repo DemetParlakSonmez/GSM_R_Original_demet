@@ -40,7 +40,10 @@ score_group <- function(expr, labels, genes, train_idx,
     svm = score_group_svm,
     knn = score_group_knn,
     xgb = score_group_xgb,
-    stop("Unknown scoring method: '", method, "'. Available: 'rf', 'svm', 'knn', 'xgb'.")
+    mlp = score_group_mlp,
+    gnn = score_group_gnn,
+    stop("Unknown scoring method: '", method, "'. Available: ",
+         "'rf', 'svm', 'knn', 'xgb', 'mlp', 'gnn'.")
   )
   fn(expr, labels, genes, train_idx, ...)
 }
@@ -105,6 +108,19 @@ score_group_train <- function(expr, labels, genes, train_idx,
     class::knn(train = x_tr, test = x_va, cl = y_tr, k = kk)
   } else if (method == "xgb") {
     res <- .xgb_fit(x_tr, y_tr, x_va, ...)
+    factor(ifelse(res$prob > 0.5, res$pos, res$neg), levels = levels(droplevels(y_tr)))
+  } else if (method == "mlp") {
+    res <- .mlp_fit(x_tr, y_tr, x_va, ...)
+    factor(ifelse(res$prob > 0.5, res$pos, res$neg), levels = levels(droplevels(y_tr)))
+  } else if (method == "gnn") {
+    dots <- list(...)
+    # x_tr is samples x genes and holds only this inner CV fold's training rows,
+    # so t(x_tr) is a leakage-free source for the correlation fallback graph.
+    adj <- gsm_gene_adjacency(colnames(x_tr), graph = dots$graph,
+                              expr = t(x_tr), train_idx = NULL,
+                              cor_threshold = dots$cor_threshold %||% 0.3)
+    dots$graph <- NULL; dots$cor_threshold <- NULL
+    res <- do.call(.gnn_fit, c(list(x_tr, y_tr, x_va, adj), dots))
     factor(ifelse(res$prob > 0.5, res$pos, res$neg), levels = levels(droplevels(y_tr)))
   } else {
     stop("Unknown scoring method: '", method, "'.")

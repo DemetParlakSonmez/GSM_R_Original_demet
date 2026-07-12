@@ -78,7 +78,8 @@ perm_nperm: {perm_nperm}
 # 4. Scoring & Modeling Parameters
 # ------------------------------------------------------------------------------
 
-# Classifier used to score individual groups ('rf', 'svm', 'knn', 'xgb').
+# Classifier used to score individual groups
+# ('rf', 'svm', 'knn', 'xgb', 'mlp' = neural net, 'gnn' = graph neural net).
 score_method: '{score_method}'
 
 # Number of trees for Random Forest (if score_method or model_method is 'rf').
@@ -95,6 +96,22 @@ svm_gamma: {svm_gamma}
 
 # K-Nearest Neighbors 'k' parameter.
 knn_k: {knn_k}
+
+# Deep learning ('mlp' / 'gnn'). Both need the 'torch' package.
+# MLP hidden-layer widths, comma-separated (e.g. '64,32' = two hidden layers).
+mlp_hidden: '{mlp_hidden}'
+
+# GNN hidden width (a single value; the GCN uses two graph-convolution layers).
+gnn_hidden: {gnn_hidden}
+
+# GNN fallback graph: absolute-correlation cutoff, used only when no BRIDGE
+# differential network is available (i.e. with a file-based grouping).
+gnn_cor_threshold: {gnn_cor_threshold}
+
+# Shared neural-net training hyperparameters (apply to both 'mlp' and 'gnn').
+nn_dropout: {nn_dropout}
+nn_epochs: {nn_epochs}
+nn_lr: {nn_lr}
 
 # Enable Phase I gene shaving using Welch t-test and BH FDR filter (true or false).
 shave_genes: {shave_genes}
@@ -124,7 +141,8 @@ run_mccv_mode: {run_mccv_mode}
 # Number of cross-validation iterations for MCCV.
 mccv_iterations: {mccv_iterations}
 
-# Classifier used for building the final joint model on the top K groups ('same', 'rf', 'svm', 'knn', 'xgb').
+# Classifier used for building the final joint model on the top K groups
+# ('same', 'rf', 'svm', 'knn', 'xgb', 'mlp', 'gnn').
 model_method: '{model_method}'
 
 # Ratio of samples assigned to the training split per iteration (e.g., 0.7).
@@ -194,7 +212,16 @@ read_settings <- function(file) {
 #' @export
 export_settings <- function(current_values, file) {
   template <- gsmr_settings_template()
-  
+
+  # Any placeholder the caller doesn't supply falls back to its pipeline default.
+  # Without this, an unsupplied {name} survives substitution as a literal brace
+  # and the exported YAML no longer parses.
+  defaults <- gsm_resolve_params(list())
+  missing <- setdiff(names(defaults), names(current_values))
+  for (name in missing) {
+    if (!is.null(defaults[[name]])) current_values[[name]] <- defaults[[name]]
+  }
+
   # Replace placeholders with actual values
   for (name in names(current_values)) {
     val <- current_values[[name]]
