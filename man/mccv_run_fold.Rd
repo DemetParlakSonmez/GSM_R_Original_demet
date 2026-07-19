@@ -17,8 +17,11 @@ mccv_run_fold(
   top_n = 10,
   shave = TRUE,
   fdr_alpha = 0.05,
+  shave_method = "fdr",
+  shave_k = 100,
   normalize = FALSE,
-  seed = 42
+  seed = 42,
+  progress_file = NULL
 )
 }
 \arguments{
@@ -27,6 +30,12 @@ mccv_run_fold(
 \item{fold}{Integer fold index (also offsets the seed: \code{seed + fold}).}
 
 \item{train_ratio, pre_score_method, pre_score_top_percent, score_method, model_method, score_args, model_args, seed}{See \code{\link[=run_mccv]{run_mccv()}}.}
+
+\item{top_n, shave, fdr_alpha, shave_method, shave_k, normalize}{See \code{\link[=run_mccv]{run_mccv()}}.}
+
+\item{progress_file}{Optional path; when set, a one-line stage marker is
+written at each phase so a watcher (the Shiny app) can show live per-fold
+progress. \code{NULL} (default) is a no-op.}
 }
 \value{
 A list with \code{fold}, \code{status} ("success"/"error"), and on success

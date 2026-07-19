@@ -4,7 +4,14 @@
 \alias{shave_genes}
 \title{Shave genes by a training-only Welch t-test with BH-FDR control}
 \usage{
-shave_genes(expr, labels, train_idx, alpha = 0.05)
+shave_genes(
+  expr,
+  labels,
+  train_idx,
+  alpha = 0.05,
+  method = c("fdr", "topk"),
+  top_k = 100
+)
 }
 \arguments{
 \item{expr}{Numeric matrix (genes x samples).}
@@ -13,12 +20,23 @@ shave_genes(expr, labels, train_idx, alpha = 0.05)
 
 \item{train_idx}{Integer vector of training sample indices.}
 
-\item{alpha}{BH-FDR threshold (default \code{0.05}).}
+\item{alpha}{BH-FDR threshold (default \code{0.05}). Used when \code{method = "fdr"}.}
+
+\item{method}{Selection rule for surviving genes:
+\itemize{
+\item \code{"fdr"} (default) — keep genes with BH-adjusted p-value below \code{alpha}.
+The number of survivors varies from fold to fold with the data.
+\item \code{"topk"} — keep the \code{top_k} genes with the strongest evidence (smallest
+raw p-value, ties broken by larger \verb{|t|}), giving a \strong{fixed} count per
+fold regardless of significance.
+}}
+
+\item{top_k}{Number of genes to keep when \code{method = "topk"}. Default \code{100}.}
 }
 \value{
 Character vector of surviving gene names. If fewer than two genes
-pass (or a class has <2 training samples), falls back to returning all
-genes so the pipeline can continue.
+pass FDR (or a class has <2 training samples / data is not two-class), the
+function falls back to returning all genes so the pipeline can continue.
 }
 \description{
 Vectorised two-class Welch t-test computed on the training samples, with
