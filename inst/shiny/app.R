@@ -29,6 +29,15 @@ if (requireNamespace("gsmR", quietly = TRUE)) {
 .example_groups_dir <- getOption("gsmR.example_groups_dir",
                                  file.path(.launch_dir, "example_grouping_files"))
 
+# Fallback to package root (../../) if running from inst/shiny and dirs are missing
+if (!dir.exists(.example_input_dir)) {
+  .pkg_root <- normalizePath(file.path(dirname(sys.frame(1)$ofile %||% "."), "..", ".."), mustWork = FALSE)
+  if (dir.exists(file.path(.pkg_root, "example_input_files"))) {
+    .example_input_dir <- file.path(.pkg_root, "example_input_files")
+    .example_groups_dir <- file.path(.pkg_root, "example_grouping_files")
+  }
+}
+
 .list_examples <- function(dir, pattern) {
   if (!dir.exists(dir)) return(character(0))
   sort(list.files(dir, pattern = pattern, ignore.case = TRUE))
@@ -636,7 +645,7 @@ ui <- page_navbar(
         card(full_screen = TRUE,
           card_header("\U0001F3B2 Empirical group significance (permutation p-value + BH FDR)"),
           tags$small(class = "text-muted",
-                     "observed = train-only mean F1; null_mean = mean over random same-size gene sets; p_adj = BH-FDR across tested groups."),
+                     "observed = train-only mean Accuracy; null_mean = mean over random same-size gene sets; p_adj = BH-FDR across tested groups."),
           DTOutput("permtest_table")
         )
       ),
@@ -734,14 +743,14 @@ ui <- page_navbar(
 
         tags$hr(),
         tags$div(style = "display:flex; align-items:center; gap:4px;",
-          checkboxInput("run_mccv_mode", "Multi-Fold MCCV", value = FALSE),
+          checkboxInput("run_mccv_mode", "Multi-Fold MCCV", value = TRUE),
           help_tip("Monte Carlo Cross-Validation: repeat the entire scoring pipeline across many random train/test splits for robust statistics.")
         ),
         
         # Parallel MCCV options
         conditionalPanel(
           condition = "input.run_mccv_mode",
-          numericInput("mccv_iterations", "MCCV Iterations", value = 10, min = 1, max = 500),
+          numericInput("mccv_iterations", "MCCV Iterations", value = 100, min = 1, max = 500),
           sliderInput("mccv_cores", "CPU Cores", min = 1, max = parallel::detectCores(), 
                       value = max(1, parallel::detectCores() - 1), step = 1),
           selectInput("model_method", "Final Modeling Classifier",
@@ -751,7 +760,7 @@ ui <- page_navbar(
                                   "K-Nearest Neighbors" = "knn",
                                   "XGBoost" = "xgb"),
                       selected = "same"),
-          sliderInput("mccv_train_ratio", "Training Ratio", min = 0.5, max = 0.9, value = 0.7, step = 0.05)
+          sliderInput("mccv_train_ratio", "Training Ratio", min = 0.5, max = 0.9, value = 0.9, step = 0.05)
         ),
         
         tags$hr(),
@@ -846,7 +855,7 @@ ui <- page_navbar(
             conditionalPanel(
               condition = "!input.run_mccv_mode",
               layout_columns(col_widths = c(7, 5),
-                card(full_screen = TRUE, card_header("Group scores (train-only F1, ranked)"),
+                card(full_screen = TRUE, card_header("Group scores (train-only Accuracy, ranked)"),
                      DTOutput("score_table")),
                 card(full_screen = TRUE, card_header("Score distribution"),
                      plotOutput("plot_scores", height = "320px")))
@@ -1121,7 +1130,7 @@ ui <- page_navbar(
             field_label("Train ratio", "Fraction of samples used for training in each fold's random split (e.g. 0.7 = 70% train, 30% held-out test). Pre-scoring, gene shaving, scoring and modeling all use the training part only."),
             numericInput("bp_train_ratio", NULL, value = 0.7, min = 0.5, max = 0.95, step = 0.05)),
           tags$div(
-            field_label("Top-N groups", "Accumulative modeling builds classifiers from the top-1, top-2, ... up to top-N ranked groups, reporting performance at each level. The best k (by F1) is chosen per fold."),
+            field_label("Top-N groups", "Accumulative modeling builds classifiers from the top-1, top-2, ... up to top-N ranked groups, reporting performance at each level. The best k (by Accuracy) is chosen per fold."),
             numericInput("bp_n_top_groups", NULL, value = 10, min = 1))),
         field_label("Final modeling", "Classifier used to build the final accumulative model from the top-ranked groups. 'Same as scoring' reuses the classifier above; otherwise pick a different algorithm for the modeling step."),
         selectInput("bp_model_method", NULL,
@@ -2114,7 +2123,7 @@ server <- function(input, output, session) {
           }
           K <- min(input$n_top_groups, length(candidates))
 
-          # Phase II — score each candidate (mean F1, k-fold CV, TRAIN only) -> rank.
+          # Phase II — score each candidate (mean Accuracy, k-fold CV, TRAIN only) -> rank.
           scores <- numeric(length(candidates)); names(scores) <- names(candidates)
           for (i in seq_along(candidates)) {
             gname <- names(candidates)[i]
@@ -2148,8 +2157,9 @@ server <- function(input, output, session) {
               AUC = m$metrics$AUC %||% NA_real_,
               stringsAsFactors = FALSE)
             m$.k <- k
-            if (is.null(best_model) || m$metrics$F_measure > best_model$metrics$F_measure)
+            if (is.null(best_model) || m$metrics$Accuracy > best_model$metrics$Accuracy) {
               best_model <- m
+            }
           }
           final_model      <- best_model
           best_k           <- best_model$.k

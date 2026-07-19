@@ -16,11 +16,14 @@ NULL
 #' @param labels Factor of class labels (exactly two levels used).
 #' @param train_idx Integer vector of training sample indices.
 #' @param alpha BH-FDR threshold (default `0.05`).
+#' @param max_features Maximum number of significant genes to retain (default `2000`).
+#'   If more genes pass the FDR threshold, only the top `max_features`
+#'   (with the smallest adjusted p-values) are kept.
 #' @return Character vector of surviving gene names. If fewer than two genes
 #'   pass (or a class has <2 training samples), falls back to returning all
 #'   genes so the pipeline can continue.
 #' @export
-shave_genes <- function(expr, labels, train_idx, alpha = 0.05) {
+shave_genes <- function(expr, labels, train_idx, alpha = 0.05, max_features = 2000) {
   genes <- rownames(expr)
   wt <- welch_t_vector(expr, labels, train_idx)
   if (is.null(wt)) return(genes)                 # not two-class / too few samples
@@ -28,7 +31,13 @@ shave_genes <- function(expr, labels, train_idx, alpha = 0.05) {
   p <- 2 * stats::pt(-abs(wt$t), df = wt$df)
   p[!is.finite(wt$t) | !is.finite(wt$df)] <- 1   # constant genes -> not significant
   p_adj <- stats::p.adjust(p, method = "BH")
-  keep <- genes[is.finite(p_adj) & p_adj < alpha]
+  
+  sig_idx <- which(is.finite(p_adj) & p_adj < alpha)
+  if (length(sig_idx) > max_features) {
+    sig_idx <- sig_idx[order(p_adj[sig_idx])[1:max_features]]
+  }
+  
+  keep <- genes[sig_idx]
   if (length(keep) < 2) genes else keep          # safe fallback
 }
 

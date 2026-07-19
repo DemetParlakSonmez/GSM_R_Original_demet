@@ -46,9 +46,9 @@ score_group <- function(expr, labels, genes, train_idx,
 }
 
 
-#' Score a single group using TRAINING data only (mean F1 via k-fold CV)
+#' Score a single group using TRAINING data only (mean Accuracy via k-fold CV)
 #'
-#' Computes a ranking score for a group as the mean F1 across stratified
+#' Computes a ranking score for a group as the mean Accuracy across stratified
 #' k-fold cross-validation on the training partition only (no test leakage),
 #' matching the G-S-M Scoring phase. This is the criterion used to rank groups
 #' for the accumulative modeling step.
@@ -60,47 +60,61 @@ score_group <- function(expr, labels, genes, train_idx,
 #' @param method Classifier method (`"rf"`, `"svm"`, `"knn"`).
 #' @param cv Number of stratified CV folds (default 3, per the paper).
 #' @param ... Additional arguments passed to the classifier.
-#' @return A single numeric mean-F1 score (NA if no usable genes).
+#' @return A single numeric mean-Accuracy score (NA if no usable genes).
 #' @export
 score_group_train <- function(expr, labels, genes, train_idx,
-                              method = "rf", cv = 3, ...) {
+                              method = "rf", cv = 10, ...) {
   stopifnot(is.matrix(expr) && is.numeric(expr))
   stopifnot(is.factor(labels))
   genes <- intersect(genes, rownames(expr))
-  if (length(genes) == 0) return(NA_real_)
+  if (length(genes) == 0) {
+    return(NA_real_)
+  }
 
-  x <- t(expr[genes, train_idx, drop = FALSE])    # samples x genes
+  x <- t(expr[genes, train_idx, drop = FALSE]) # samples x genes
   y <- droplevels(labels[train_idx])
-  if (nlevels(y) < 2) return(NA_real_)
+  if (nlevels(y) < 2) {
+    return(NA_real_)
+  }
   pos <- if ("pos" %in% levels(y)) "pos" else levels(y)[1]
 
   folds <- stratified_folds(y, k = cv)
-  f1s <- vapply(seq_along(folds), function(i) {
-    va <- folds[[i]]; tr <- setdiff(seq_along(y), va)
-    if (length(unique(y[tr])) < 2 || length(va) == 0) return(NA_real_)
-    pred <- .cv_predict(method, x[tr, , drop = FALSE], y[tr],
-                        x[va, , drop = FALSE], ...)
-    if (is.null(pred)) return(NA_real_)
-    calc_f_measure(y[va], pred, positive_class = pos)
+  accs <- vapply(seq_along(folds), function(i) {
+    va <- folds[[i]]
+    tr <- setdiff(seq_along(y), va)
+    if (length(unique(y[tr])) < 2 || length(va) == 0) {
+      return(NA_real_)
+    }
+    pred <- .cv_predict(
+      method, x[tr, , drop = FALSE], y[tr],
+      x[va, , drop = FALSE], ...
+    )
+    if (is.null(pred)) {
+      return(NA_real_)
+    }
+    calc_accuracy(y[va], pred)
   }, numeric(1))
-  mean(f1s, na.rm = TRUE)
+  mean(accs, na.rm = TRUE)
 }
 
 # Train on (x_tr, y_tr), predict x_va, for one CV fold. Returns a factor or NULL.
 .cv_predict <- function(method, x_tr, y_tr, x_va, ...) {
   if (method == "rf") {
-    if (!requireNamespace("randomForest", quietly = TRUE))
+    if (!requireNamespace("randomForest", quietly = TRUE)) {
       stop("Package 'randomForest' is required for method 'rf'.")
+    }
     fit <- randomForest::randomForest(x = as.data.frame(x_tr), y = y_tr, ...)
     stats::predict(fit, newdata = as.data.frame(x_va))
   } else if (method == "svm") {
-    if (!requireNamespace("e1071", quietly = TRUE))
+    if (!requireNamespace("e1071", quietly = TRUE)) {
       stop("Package 'e1071' is required for method 'svm'.")
+    }
     fit <- e1071::svm(x = as.data.frame(x_tr), y = y_tr, ...)
     stats::predict(fit, newdata = as.data.frame(x_va))
   } else if (method == "knn") {
-    if (!requireNamespace("class", quietly = TRUE))
+    if (!requireNamespace("class", quietly = TRUE)) {
       stop("Package 'class' is required for method 'knn'.")
+    }
     kk <- list(...)$k %||% 3
     class::knn(train = x_tr, test = x_va, cl = y_tr, k = kk)
   } else if (method == "xgb") {
@@ -116,30 +130,36 @@ score_group_train <- function(expr, labels, genes, train_idx,
 # list(fit, prob = P(positive) on x_te, pos, neg, levels). Two-class only.
 .xgb_fit <- function(x_tr, y_tr, x_te, positive_class = NULL, ...) {
   if (!requireNamespace("xgboost", quietly = TRUE)) {
-    stop("Package 'xgboost' is required for method 'xgb'. ",
-         "Install it with: install.packages('xgboost')")
+    stop(
+      "Package 'xgboost' is required for method 'xgb'. ",
+      "Install it with: install.packages('xgboost')"
+    )
   }
   y_tr <- droplevels(as.factor(y_tr))
   lev <- levels(y_tr)
-  if (length(lev) != 2)
+  if (length(lev) != 2) {
     stop("method 'xgb' currently supports two-class problems only.")
-  if (is.null(positive_class) || !positive_class %in% lev)
+  }
+  if (is.null(positive_class) || !positive_class %in% lev) {
     positive_class <- if ("pos" %in% lev) "pos" else lev[length(lev)]
+  }
   neg <- setdiff(lev, positive_class)
-  label <- as.integer(y_tr == positive_class)        # 1 = positive class
+  label <- as.integer(y_tr == positive_class) # 1 = positive class
 
   dots <- list(...)
   nrounds <- dots$nrounds %||% 50L
   params <- dots$params %||% list()
   params$objective <- params$objective %||% "binary:logistic"
-  if (is.null(params$nthread)) params$nthread <- 1   # avoid nested parallelism in MCCV
+  if (is.null(params$nthread)) params$nthread <- 1 # avoid nested parallelism in MCCV
 
   # Use the stable low-level xgb.train/xgb.DMatrix API (the high-level
   # xgboost() signature changed in 2.x). The DMatrix keeps the matrix column
   # names, so xgb.importance() reports genes rather than f0/f1/...
   dtrain <- xgboost::xgb.DMatrix(data = as.matrix(x_tr), label = label)
-  fit <- xgboost::xgb.train(params = params, data = dtrain,
-                            nrounds = nrounds, verbose = 0)
+  fit <- xgboost::xgb.train(
+    params = params, data = dtrain,
+    nrounds = nrounds, verbose = 0
+  )
   prob <- as.numeric(stats::predict(fit, as.matrix(x_te)))
   list(fit = fit, prob = prob, pos = positive_class, neg = neg, levels = lev)
 }
@@ -150,7 +170,7 @@ score_group_train <- function(expr, labels, genes, train_idx,
 #' @return List of length k; each element holds the row indices of that fold.
 #' @export
 stratified_folds <- function(y, k = 3) {
-  k <- max(2, min(k, min(table(y))))              # k <= smallest class size
+  k <- max(2, min(k, min(table(y)))) # k <= smallest class size
   fold_id <- integer(length(y))
   for (lev in levels(y)) {
     idx <- which(y == lev)
@@ -177,8 +197,10 @@ stratified_folds <- function(y, k = 3) {
 #' @keywords internal
 score_group_rf <- function(expr, labels, genes, train_idx, ...) {
   if (!requireNamespace("randomForest", quietly = TRUE)) {
-    stop("Package 'randomForest' is required for method 'rf'. ",
-         "Install it with: install.packages('randomForest')")
+    stop(
+      "Package 'randomForest' is required for method 'rf'. ",
+      "Install it with: install.packages('randomForest')"
+    )
   }
 
   test_idx <- setdiff(seq_len(ncol(expr)), train_idx)
@@ -188,10 +210,10 @@ score_group_rf <- function(expr, labels, genes, train_idx, ...) {
 
   # Build data frames (samples x genes)
   train_data <- as.data.frame(t(expr[genes, train_idx, drop = FALSE]))
-  test_data  <- as.data.frame(t(expr[genes, test_idx, drop = FALSE]))
+  test_data <- as.data.frame(t(expr[genes, test_idx, drop = FALSE]))
 
   train_labels <- labels[train_idx]
-  test_labels  <- labels[test_idx]
+  test_labels <- labels[test_idx]
 
   positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
 
@@ -204,18 +226,24 @@ score_group_rf <- function(expr, labels, genes, train_idx, ...) {
 
   # Predict on test set (class + positive-class probability for AUC)
   predictions <- stats::predict(model, newdata = test_data)
-  prob_pos <- tryCatch({
-    pm <- stats::predict(model, newdata = test_data, type = "prob")
-    if (positive_class %in% colnames(pm)) pm[, positive_class] else NULL
-  }, error = function(e) NULL)
+  prob_pos <- tryCatch(
+    {
+      pm <- stats::predict(model, newdata = test_data, type = "prob")
+      if (positive_class %in% colnames(pm)) pm[, positive_class] else NULL
+    },
+    error = function(e) NULL
+  )
 
   list(
-    accuracy    = calc_accuracy(test_labels, predictions),
-    auc         = if (is.null(prob_pos)) NA_real_
-                  else calc_auc(test_labels, prob_pos, positive_class),
+    accuracy = calc_accuracy(test_labels, predictions),
+    auc = if (is.null(prob_pos)) {
+      NA_real_
+    } else {
+      calc_auc(test_labels, prob_pos, positive_class)
+    },
     predictions = predictions,
-    prob        = prob_pos,
-    actual      = test_labels
+    prob = prob_pos,
+    actual = test_labels
   )
 }
 
@@ -231,8 +259,10 @@ score_group_rf <- function(expr, labels, genes, train_idx, ...) {
 #' @keywords internal
 score_group_svm <- function(expr, labels, genes, train_idx, ...) {
   if (!requireNamespace("e1071", quietly = TRUE)) {
-    stop("Package 'e1071' is required for method 'svm'. ",
-         "Install it with: install.packages('e1071')")
+    stop(
+      "Package 'e1071' is required for method 'svm'. ",
+      "Install it with: install.packages('e1071')"
+    )
   }
 
   test_idx <- setdiff(seq_len(ncol(expr)), train_idx)
@@ -241,10 +271,10 @@ score_group_svm <- function(expr, labels, genes, train_idx, ...) {
   }
 
   train_data <- as.data.frame(t(expr[genes, train_idx, drop = FALSE]))
-  test_data  <- as.data.frame(t(expr[genes, test_idx, drop = FALSE]))
+  test_data <- as.data.frame(t(expr[genes, test_idx, drop = FALSE]))
 
   train_labels <- labels[train_idx]
-  test_labels  <- labels[test_idx]
+  test_labels <- labels[test_idx]
 
   positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
 
@@ -258,18 +288,24 @@ score_group_svm <- function(expr, labels, genes, train_idx, ...) {
 
   # Predict on test set (class + positive-class probability)
   predictions <- stats::predict(model, newdata = test_data, probability = TRUE)
-  prob_pos <- tryCatch({
-    pm <- attr(predictions, "probabilities")
-    if (!is.null(pm) && positive_class %in% colnames(pm)) pm[, positive_class] else NULL
-  }, error = function(e) NULL)
+  prob_pos <- tryCatch(
+    {
+      pm <- attr(predictions, "probabilities")
+      if (!is.null(pm) && positive_class %in% colnames(pm)) pm[, positive_class] else NULL
+    },
+    error = function(e) NULL
+  )
 
   list(
-    accuracy    = calc_accuracy(test_labels, predictions),
-    auc         = if (is.null(prob_pos)) NA_real_
-                  else calc_auc(test_labels, prob_pos, positive_class),
+    accuracy = calc_accuracy(test_labels, predictions),
+    auc = if (is.null(prob_pos)) {
+      NA_real_
+    } else {
+      calc_auc(test_labels, prob_pos, positive_class)
+    },
     predictions = predictions,
-    prob        = prob_pos,
-    actual      = test_labels
+    prob = prob_pos,
+    actual = test_labels
   )
 }
 
@@ -294,10 +330,10 @@ score_group_knn <- function(expr, labels, genes, train_idx, ...) {
   }
 
   train_data <- t(expr[genes, train_idx, drop = FALSE])
-  test_data  <- t(expr[genes, test_idx, drop = FALSE])
+  test_data <- t(expr[genes, test_idx, drop = FALSE])
 
   train_labels <- labels[train_idx]
-  test_labels  <- labels[test_idx]
+  test_labels <- labels[test_idx]
 
   positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
 
@@ -309,18 +345,24 @@ score_group_knn <- function(expr, labels, genes, train_idx, ...) {
     prob  = TRUE,
     ...
   )
-  prob_pos <- tryCatch({
-    pr <- attr(predictions, "prob")
-    if (is.null(pr)) NULL else ifelse(predictions == positive_class, pr, 1 - pr)
-  }, error = function(e) NULL)
+  prob_pos <- tryCatch(
+    {
+      pr <- attr(predictions, "prob")
+      if (is.null(pr)) NULL else ifelse(predictions == positive_class, pr, 1 - pr)
+    },
+    error = function(e) NULL
+  )
 
   list(
-    accuracy    = calc_accuracy(test_labels, predictions),
-    auc         = if (is.null(prob_pos)) NA_real_
-                  else calc_auc(test_labels, prob_pos, positive_class),
+    accuracy = calc_accuracy(test_labels, predictions),
+    auc = if (is.null(prob_pos)) {
+      NA_real_
+    } else {
+      calc_auc(test_labels, prob_pos, positive_class)
+    },
     predictions = predictions,
-    prob        = prob_pos,
-    actual      = test_labels
+    prob = prob_pos,
+    actual = test_labels
   )
 }
 
@@ -343,13 +385,14 @@ score_group_xgb <- function(expr, labels, genes, train_idx, ...) {
   if (length(test_idx) == 0) stop("No test samples.")
 
   train_data <- t(expr[genes, train_idx, drop = FALSE])
-  test_data  <- t(expr[genes, test_idx, drop = FALSE])
+  test_data <- t(expr[genes, test_idx, drop = FALSE])
   test_labels <- labels[test_idx]
   positive_class <- if ("pos" %in% levels(labels)) "pos" else levels(labels)[1]
 
   res <- .xgb_fit(train_data, labels[train_idx], test_data, positive_class, ...)
   predictions <- factor(ifelse(res$prob > 0.5, res$pos, res$neg),
-                        levels = levels(labels))
+    levels = levels(labels)
+  )
 
   list(
     accuracy    = calc_accuracy(test_labels, predictions),
@@ -359,4 +402,3 @@ score_group_xgb <- function(expr, labels, genes, train_idx, ...) {
     actual      = test_labels
   )
 }
-
