@@ -12,7 +12,7 @@ NULL
 #'
 #' @param dataset A `gsm_dataset` object.
 #' @param fold Integer fold index (also offsets the seed: `seed + fold`).
-#' @param train_ratio,pre_score_method,pre_score_top_percent,score_method,model_method,score_args,model_args,seed
+#' @param train_ratio,pre_score_method,pre_score_top_percent,pre_score_q_threshold,score_method,model_method,score_args,model_args,seed
 #'   See [run_mccv()].
 #' @param top_n,shave,fdr_alpha,shave_method,shave_k,normalize See [run_mccv()].
 #' @param progress_file Optional path; when set, a one-line stage marker is
@@ -25,6 +25,7 @@ NULL
 #' @export
 mccv_run_fold <- function(dataset, fold, train_ratio = 0.9,
                           pre_score_method = "anova", pre_score_top_percent = 1,
+                          pre_score_q_threshold = 0.05,
                           score_method = "rf", model_method = "rf",
                           score_args = list(), model_args = list(),
                           top_n = 10, shave = TRUE, fdr_alpha = 0.05,
@@ -93,7 +94,8 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.9,
       # Candidate groups: optional ANOVA group pre-filter, then shave their genes.
       candidates <- pre_score_groups(ds, split$train,
         method = pre_score_method,
-        top_percent = pre_score_top_percent
+        top_percent = pre_score_top_percent,
+        q_threshold = pre_score_q_threshold
       )
       pre_sc <- attr(candidates, "scores")
       candidates <- shave_groups(candidates, keep_genes)
@@ -197,6 +199,8 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.9,
 #' @param train_ratio Numeric. Proportion of samples for training. Default `0.9`.
 #' @param pre_score_method Pre-scoring method. Default `"anova"`.
 #' @param pre_score_top_percent Percentage of top groups to retain. Default `1`.
+#' @param pre_score_q_threshold BH q-value cutoff for the `"zscore"` method.
+#'   Groups with q < threshold are considered significant. Default `0.05`.
 #' @param score_method Classifier method for group scoring. Default `"rf"`.
 #' @param model_method Classifier method for final model. Default `"rf"`.
 #' @param score_args Named list of additional arguments passed to the scoring classifier. Default `list()`.
@@ -217,6 +221,7 @@ mccv_run_fold <- function(dataset, fold, train_ratio = 0.9,
 #' @export
 run_mccv <- function(dataset, n_iterations = 100, train_ratio = 0.9,
                      pre_score_method = "anova", pre_score_top_percent = 1,
+                     pre_score_q_threshold = 0.05,
                      score_method = "rf", model_method = "rf",
                      score_args = list(), model_args = list(),
                      top_n = 10, shave = TRUE, fdr_alpha = 0.05,
@@ -241,6 +246,7 @@ run_mccv <- function(dataset, n_iterations = 100, train_ratio = 0.9,
       train_ratio = train_ratio,
       pre_score_method = pre_score_method,
       pre_score_top_percent = pre_score_top_percent,
+      pre_score_q_threshold = pre_score_q_threshold,
       score_method = score_method, model_method = model_method,
       score_args = score_args, model_args = model_args,
       top_n = top_n, shave = shave, fdr_alpha = fdr_alpha,
@@ -266,7 +272,7 @@ run_mccv <- function(dataset, n_iterations = 100, train_ratio = 0.9,
     })
     parallel::clusterExport(cl, c(
       "dataset", "train_ratio", "pre_score_method",
-      "pre_score_top_percent", "score_method",
+      "pre_score_top_percent", "pre_score_q_threshold", "score_method",
       "model_method", "seed", "score_args",
       "model_args", "shave_method", "shave_k"
     ),

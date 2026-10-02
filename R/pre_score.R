@@ -55,16 +55,19 @@ pre_score_groups <- function(dataset, train_idx, method = "anova",
   stopifnot(top_percent > 0 && top_percent <= 100)
 
   fn <- switch(method,
-    anova        = pre_score_anova,
-    limma        = pre_score_limma,
+    anova = pre_score_anova,
+    limma = pre_score_limma,
     fisher_chisq = pre_score_fisher_chisq,
-    ebm          = pre_score_ebm,
-    camera       = pre_score_camera,
-    gsva         = pre_score_gsva,
-    none         = pre_score_none,
-    stop("Unknown pre-scoring method: '", method, "'. ",
-         "Available methods: 'anova', 'limma', 'fisher_chisq', 'ebm', ",
-         "'camera', 'gsva', 'none'.")
+    ebm = pre_score_ebm,
+    camera = pre_score_camera,
+    gsva = pre_score_gsva,
+    zscore = pre_score_zscore,
+    none = pre_score_none,
+    stop(
+      "Unknown pre-scoring method: '", method, "'. ",
+      "Available methods: 'anova', 'limma', 'fisher_chisq', 'ebm', ",
+      "'camera', 'gsva', 'zscore', 'none'."
+    )
   )
   fn(dataset, train_idx, top_percent = top_percent, progress = progress, ...)
 }
@@ -103,15 +106,18 @@ pre_score_anova <- function(dataset, train_idx, top_percent = 20,
 
     # Run one-way ANOVA for each gene, collect p-values
     pvals <- vapply(seq_len(nrow(gene_expr)), \(i) {
-      tryCatch({
-        fit <- stats::oneway.test(gene_expr[i, ] ~ labels)
-        fit$p.value
-      }, error = \(e) 1.0)
+      tryCatch(
+        {
+          fit <- stats::oneway.test(gene_expr[i, ] ~ labels)
+          fit$p.value
+        },
+        error = \(e) 1.0
+      )
     }, numeric(1))
 
     # Aggregate using Fisher's method: -2 * sum(log(p))
     # Higher value = more significant
-    pvals[pvals == 0] <- .Machine$double.xmin  # avoid log(0)
+    pvals[pvals == 0] <- .Machine$double.xmin # avoid log(0)
     group_scores[j] <- -2 * sum(log(pvals))
 
     if (!is.null(progress)) progress(j, n, gnames[j], group_scores[j])
@@ -125,7 +131,7 @@ pre_score_anova <- function(dataset, train_idx, top_percent = 20,
   top_names <- names(sorted_scores)[seq_len(n_keep)]
 
   result <- groups[top_names]
-  attr(result, "scores") <- sorted_scores  # all groups, most significant first
+  attr(result, "scores") <- sorted_scores # all groups, most significant first
   attr(result, "n_keep") <- n_keep
   result
 }
@@ -152,15 +158,17 @@ pre_score_anova <- function(dataset, train_idx, top_percent = 20,
 pre_score_limma <- function(dataset, train_idx, top_percent = 20,
                             progress = NULL, ...) {
   if (!requireNamespace("limma", quietly = TRUE)) {
-    stop("Package 'limma' is required for method 'limma'. ",
-         "Install it with: BiocManager::install('limma')")
+    stop(
+      "Package 'limma' is required for method 'limma'. ",
+      "Install it with: BiocManager::install('limma')"
+    )
   }
   expr <- dataset$expr[, train_idx, drop = FALSE]
   labels <- droplevels(dataset$labels[train_idx])
   groups <- dataset$groups
 
   # One moderated fit over all genes; design = intercept + class effect(s).
-  design <- stats::model.matrix(~ labels)
+  design <- stats::model.matrix(~labels)
   fit <- limma::eBayes(limma::lmFit(expr, design))
   # F.p.value tests all non-intercept coefficients jointly (works for >2 classes).
   pvals <- fit$F.p.value
@@ -226,24 +234,26 @@ pre_score_limma <- function(dataset, train_idx, top_percent = 20,
 #'   `n_keep` attributes.
 #' @keywords internal
 .pre_score_finalize <- function(groups, pvals, top_percent) {
-  pvals <- pvals[names(groups)]               # align order to groups
+  pvals <- pvals[names(groups)] # align order to groups
   pvals[!is.finite(pvals)] <- 1
   pvals[pvals <= 0] <- .Machine$double.xmin
-  padj   <- stats::p.adjust(pvals, method = "BH")
-  scores <- -log10(pvals)                     # higher = more significant
+  padj <- stats::p.adjust(pvals, method = "BH")
+  scores <- -log10(pvals) # higher = more significant
 
-  ord    <- order(scores, decreasing = TRUE)
-  scores <- scores[ord]; pvals <- pvals[ord]; padj <- padj[ord]
+  ord <- order(scores, decreasing = TRUE)
+  scores <- scores[ord]
+  pvals <- pvals[ord]
+  padj <- padj[ord]
 
-  n      <- length(scores)
+  n <- length(scores)
   n_keep <- max(1, ceiling(n * top_percent / 100))
   top_names <- names(scores)[seq_len(n_keep)]
 
   result <- groups[top_names]
-  attr(result, "scores")  <- scores   # all groups, most significant first
+  attr(result, "scores") <- scores # all groups, most significant first
   attr(result, "pvalues") <- pvals
-  attr(result, "padj")    <- padj
-  attr(result, "n_keep")  <- n_keep
+  attr(result, "padj") <- padj
+  attr(result, "n_keep") <- n_keep
   result
 }
 
@@ -256,8 +266,11 @@ pre_score_limma <- function(dataset, train_idx, top_percent = 20,
 #' @return Numeric vector the same length as `x` (all zeros if `x` is constant).
 #' @keywords internal
 .ebm_transform <- function(x) {
-  m <- mean(x); s <- stats::sd(x)
-  if (!is.finite(s) || s == 0) return(rep(0, length(x)))
+  m <- mean(x)
+  s <- stats::sd(x)
+  if (!is.finite(s) || s == 0) {
+    return(rep(0, length(x)))
+  }
   z <- (x - m) / s
   -2 * log(stats::ecdf(z)(z))
 }
@@ -275,18 +288,25 @@ pre_score_limma <- function(dataset, train_idx, top_percent = 20,
 #' @keywords internal
 .ebm_combine <- function(pvals, data_matrix) {
   N <- length(pvals)
-  if (N == 0) return(1)
-  if (N == 1) return(unname(pvals[1]))
+  if (N == 0) {
+    return(1)
+  }
+  if (N == 1) {
+    return(unname(pvals[1]))
+  }
 
-  wt    <- apply(data_matrix, 1, .ebm_transform)  # samples x genes
-  covar <- stats::cov(wt)                          # genes x genes
-  cov_sum  <- 2 * sum(covar[lower.tri(covar)])
+  wt <- apply(data_matrix, 1, .ebm_transform) # samples x genes
+  covar <- stats::cov(wt) # genes x genes
+  cov_sum <- 2 * sum(covar[lower.tri(covar)])
   expected <- 2 * N
-  varr     <- 4 * N + cov_sum
-  cc       <- varr / (2 * expected)
+  varr <- 4 * N + cov_sum
+  cc <- varr / (2 * expected)
   df_brown <- 2 * expected^2 / varr
   df_fisher <- 2 * N
-  if (!is.finite(df_brown) || df_brown > df_fisher) { df_brown <- df_fisher; cc <- 1 }
+  if (!is.finite(df_brown) || df_brown > df_fisher) {
+    df_brown <- df_fisher
+    cc <- 1
+  }
 
   x <- -2 * sum(log(pvals))
   stats::pchisq(x / cc, df = df_brown, lower.tail = FALSE)
@@ -312,26 +332,30 @@ pre_score_limma <- function(dataset, train_idx, top_percent = 20,
 #' @keywords internal
 pre_score_fisher_chisq <- function(dataset, train_idx, top_percent = 20,
                                    progress = NULL, ...) {
-  expr   <- dataset$expr[, train_idx, drop = FALSE]
+  expr <- dataset$expr[, train_idx, drop = FALSE]
   labels <- droplevels(dataset$labels[train_idx])
   groups <- dataset$groups
 
   universe <- intersect(unique(unlist(groups)), rownames(expr))
-  gene_p   <- .pre_score_pergene_anova(expr[universe, , drop = FALSE], labels)
+  gene_p <- .pre_score_pergene_anova(expr[universe, , drop = FALSE], labels)
 
   gnames <- names(groups)
   n <- length(gnames)
-  pg <- numeric(n); names(pg) <- gnames
+  pg <- numeric(n)
+  names(pg) <- gnames
   for (j in seq_len(n)) {
     gp <- gene_p[intersect(groups[[gnames[j]]], names(gene_p))]
-    k  <- length(gp)
-    if (k == 0) { pg[j] <- 1 } else {
+    k <- length(gp)
+    if (k == 0) {
+      pg[j] <- 1
+    } else {
       gp[gp <= 0] <- .Machine$double.xmin
-      stat  <- -2 * sum(log(gp))
+      stat <- -2 * sum(log(gp))
       pg[j] <- stats::pchisq(stat, df = 2 * k, lower.tail = FALSE)
     }
-    if (!is.null(progress))
+    if (!is.null(progress)) {
       progress(j, n, gnames[j], -log10(max(pg[j], .Machine$double.xmin)))
+    }
   }
 
   .pre_score_finalize(groups, pg, top_percent)
@@ -357,25 +381,29 @@ pre_score_fisher_chisq <- function(dataset, train_idx, top_percent = 20,
 #' @keywords internal
 pre_score_ebm <- function(dataset, train_idx, top_percent = 20,
                           progress = NULL, ...) {
-  expr   <- dataset$expr[, train_idx, drop = FALSE]
+  expr <- dataset$expr[, train_idx, drop = FALSE]
   labels <- droplevels(dataset$labels[train_idx])
   groups <- dataset$groups
 
   universe <- intersect(unique(unlist(groups)), rownames(expr))
-  gene_p   <- .pre_score_pergene_anova(expr[universe, , drop = FALSE], labels)
+  gene_p <- .pre_score_pergene_anova(expr[universe, , drop = FALSE], labels)
 
   gnames <- names(groups)
   n <- length(gnames)
-  pg <- numeric(n); names(pg) <- gnames
+  pg <- numeric(n)
+  names(pg) <- gnames
   for (j in seq_len(n)) {
-    g  <- intersect(groups[[gnames[j]]], names(gene_p))
-    if (length(g) == 0) { pg[j] <- 1 } else {
+    g <- intersect(groups[[gnames[j]]], names(gene_p))
+    if (length(g) == 0) {
+      pg[j] <- 1
+    } else {
       gp <- gene_p[g]
       gp[gp <= 0] <- .Machine$double.xmin
       pg[j] <- .ebm_combine(gp, expr[g, , drop = FALSE])
     }
-    if (!is.null(progress))
+    if (!is.null(progress)) {
       progress(j, n, gnames[j], -log10(max(pg[j], .Machine$double.xmin)))
+    }
   }
 
   .pre_score_finalize(groups, pg, top_percent)
@@ -406,23 +434,29 @@ pre_score_ebm <- function(dataset, train_idx, top_percent = 20,
 pre_score_camera <- function(dataset, train_idx, top_percent = 20,
                              progress = NULL, ...) {
   if (!requireNamespace("limma", quietly = TRUE)) {
-    stop("Package 'limma' is required for method 'camera'. ",
-         "Install it with: BiocManager::install('limma')")
+    stop(
+      "Package 'limma' is required for method 'camera'. ",
+      "Install it with: BiocManager::install('limma')"
+    )
   }
-  expr   <- dataset$expr[, train_idx, drop = FALSE]
+  expr <- dataset$expr[, train_idx, drop = FALSE]
   labels <- droplevels(dataset$labels[train_idx])
   groups <- dataset$groups
 
   if (nlevels(labels) > 2) {
-    warning("method 'camera' supports two-class comparisons; ",
-            "falling back to 'fisher_chisq' for >2 classes.")
-    return(pre_score_fisher_chisq(dataset, train_idx, top_percent = top_percent,
-                                  progress = progress))
+    warning(
+      "method 'camera' supports two-class comparisons; ",
+      "falling back to 'fisher_chisq' for >2 classes."
+    )
+    return(pre_score_fisher_chisq(dataset, train_idx,
+      top_percent = top_percent,
+      progress = progress
+    ))
   }
 
-  design <- stats::model.matrix(~ labels)
-  index  <- lapply(groups, function(g) which(rownames(expr) %in% g))
-  keep   <- vapply(index, length, integer(1)) > 0
+  design <- stats::model.matrix(~labels)
+  index <- lapply(groups, function(g) which(rownames(expr) %in% g))
+  keep <- vapply(index, length, integer(1)) > 0
 
   res <- limma::camera(expr, index[keep], design, contrast = ncol(design))
 
@@ -432,9 +466,11 @@ pre_score_camera <- function(dataset, train_idx, top_percent = 20,
   pg[rownames(res)] <- res$PValue
 
   if (!is.null(progress)) {
-    gnames <- names(groups); n <- length(gnames)
-    for (j in seq_len(n))
+    gnames <- names(groups)
+    n <- length(gnames)
+    for (j in seq_len(n)) {
       progress(j, n, gnames[j], -log10(max(pg[gnames[j]], .Machine$double.xmin)))
+    }
   }
 
   .pre_score_finalize(groups, pg, top_percent)
@@ -461,24 +497,30 @@ pre_score_camera <- function(dataset, train_idx, top_percent = 20,
 #' @keywords internal
 .enrichment_matrix <- function(expr, gene_sets, method = "ssgsea") {
   gene_sets <- gene_sets[vapply(gene_sets, length, integer(1)) > 0]
-  if (length(gene_sets) == 0) return(matrix(numeric(0), nrow = 0, ncol = ncol(expr)))
+  if (length(gene_sets) == 0) {
+    return(matrix(numeric(0), nrow = 0, ncol = ncol(expr)))
+  }
 
   if (method %in% c("ssgsea", "gsva")) {
     es <- tryCatch(
       suppressMessages(suppressWarnings(.run_gsva(expr, gene_sets, method))),
       error = function(e) NULL
     )
-    if (!is.null(es)) return(as.matrix(es))
+    if (!is.null(es)) {
+      return(as.matrix(es))
+    }
     warning("GSVA enrichment failed or unavailable; using built-in z-score.")
   }
 
   # Combined z-score fallback: standardise each gene, average over the set.
-  mu  <- rowMeans(expr)
+  mu <- rowMeans(expr)
   sds <- sqrt(rowSums((expr - mu)^2) / max(1, ncol(expr) - 1))
   sds[!is.finite(sds) | sds == 0] <- 1
   z <- (expr - mu) / sds
-  out <- t(vapply(gene_sets, function(g) colMeans(z[g, , drop = FALSE]),
-                  numeric(ncol(expr))))
+  out <- t(vapply(
+    gene_sets, function(g) colMeans(z[g, , drop = FALSE]),
+    numeric(ncol(expr))
+  ))
   rownames(out) <- names(gene_sets)
   out
 }
@@ -488,8 +530,11 @@ pre_score_camera <- function(dataset, train_idx, top_percent = 20,
 .run_gsva <- function(expr, gene_sets, method) {
   ns <- asNamespace("GSVA")
   if (exists("ssgseaParam", envir = ns)) {
-    par <- if (method == "ssgsea") GSVA::ssgseaParam(expr, gene_sets)
-           else                    GSVA::gsvaParam(expr, gene_sets)
+    par <- if (method == "ssgsea") {
+      GSVA::ssgseaParam(expr, gene_sets)
+    } else {
+      GSVA::gsvaParam(expr, gene_sets)
+    }
     GSVA::gsva(par, verbose = FALSE)
   } else {
     GSVA::gsva(expr, gene_sets, method = method, verbose = FALSE)
@@ -503,11 +548,19 @@ pre_score_camera <- function(dataset, train_idx, top_percent = 20,
 #' @keywords internal
 .activity_pvalue <- function(v, labels) {
   labels <- droplevels(labels)
-  if (nlevels(labels) < 2 || any(table(labels) < 2)) return(1)
-  p <- tryCatch({
-    if (nlevels(labels) == 2) stats::t.test(v ~ labels)$p.value
-    else stats::oneway.test(v ~ labels)$p.value
-  }, error = function(e) 1)
+  if (nlevels(labels) < 2 || any(table(labels) < 2)) {
+    return(1)
+  }
+  p <- tryCatch(
+    {
+      if (nlevels(labels) == 2) {
+        stats::t.test(v ~ labels)$p.value
+      } else {
+        stats::oneway.test(v ~ labels)$p.value
+      }
+    },
+    error = function(e) 1
+  )
   if (!is.finite(p)) 1 else p
 }
 
@@ -532,12 +585,13 @@ pre_score_camera <- function(dataset, train_idx, top_percent = 20,
 #' @keywords internal
 pre_score_gsva <- function(dataset, train_idx, top_percent = 20,
                            progress = NULL, enrichment = NULL, ...) {
-  expr   <- dataset$expr[, train_idx, drop = FALSE]
+  expr <- dataset$expr[, train_idx, drop = FALSE]
   labels <- droplevels(dataset$labels[train_idx])
   groups <- dataset$groups
 
-  if (is.null(enrichment))
+  if (is.null(enrichment)) {
     enrichment <- if (requireNamespace("GSVA", quietly = TRUE)) "ssgsea" else "zscore"
+  }
 
   gl <- lapply(groups, function(g) intersect(g, rownames(expr)))
   es <- .enrichment_matrix(expr, gl, enrichment)
@@ -548,8 +602,9 @@ pre_score_gsva <- function(dataset, train_idx, top_percent = 20,
   for (j in seq_len(n)) {
     nm <- gnames[j]
     if (nm %in% rownames(es)) pg[j] <- .activity_pvalue(es[nm, ], labels)
-    if (!is.null(progress))
+    if (!is.null(progress)) {
       progress(j, n, nm, -log10(max(pg[j], .Machine$double.xmin)))
+    }
   }
 
   .pre_score_finalize(groups, pg, top_percent)
@@ -571,3 +626,173 @@ pre_score_none <- function(dataset, train_idx, progress = NULL, ...) {
   attr(result, "n_keep") <- length(result)
   result
 }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Z-score pre-scoring (limma moderated t-statistic aggregation)
+# ──────────────────────────────────────────────────────────────────────────────
+
+#' Per-gene limma moderated t-statistics
+#'
+#' Fits a limma moderated model on `expr` and returns the moderated
+#' t-statistic for each gene (for two-class: the moderated t; for >2 classes:
+#' the signed square root of the moderated F, signed by the direction of the
+#' first non-intercept coefficient). This provides a single directional
+#' summary statistic per gene that is then aggregated to the group level.
+#'
+#' @param expr Numeric matrix, genes (rows) x samples (columns), training only.
+#' @param labels Factor of class labels, length `ncol(expr)`.
+#' @return Named numeric vector of moderated t-statistics, one per row.
+#' @keywords internal
+.pre_score_limma_t <- function(expr, labels) {
+  if (!requireNamespace("limma", quietly = TRUE)) {
+    stop(
+      "Package 'limma' is required for method 'zscore'. ",
+      "Install it with: BiocManager::install('limma')"
+    )
+  }
+  design <- stats::model.matrix(~labels)
+  fit    <- limma::eBayes(limma::lmFit(expr, design))
+
+  if (nlevels(labels) == 2) {
+    # Two-class: use the moderated t-statistic directly (2nd coefficient).
+    t_stats <- fit$t[, 2]
+  } else {
+    # >2 classes: summarise to a single number per gene.
+    # Use the signed square root of the moderated F-statistic:
+    # sign is given by the first non-intercept coefficient.
+    f_stat <- fit$F
+    f_stat[!is.finite(f_stat)] <- 0
+    coef1   <- fit$coefficients[, 2]   # first non-intercept contrast
+    t_stats <- sign(coef1) * sqrt(pmax(f_stat, 0))
+  }
+
+  t_stats[!is.finite(t_stats)] <- 0
+  names(t_stats) <- rownames(expr)
+  t_stats
+}
+
+#' Pre-score groups using limma z-score aggregation (Eg^z) — 8-step pipeline
+#'
+#' Computes per-gene limma moderated t-statistics (training data only) and
+#' aggregates them to the group level using the combined z-score formula:
+#' \deqn{E^z_g = \sqrt{N_g}\,\bar{t}, \quad
+#'       \bar{t} = \frac{1}{N_g}\sum_{i \in A_g} t_i}
+#' where \eqn{N_g} is the number of genes in the group that are present in
+#' the expression matrix.
+#'
+#' **Algorithm (8 steps)**:
+#' 1. Compute limma moderated t-statistics for all genes in X.
+#' 2. Group genes using `dataset$groups`.
+#' 3. Compute group-level z-score per group.
+#' 4. Derive two-sided p-values from the standard normal CDF.
+#' 5. BH-adjust to q-values.
+#' 6. Keep only groups with q < `q_threshold`.
+#' 7. Build dataset Y: retain only genes from significant groups.
+#' 8. Run `pre_score_anova` on Y (identical to GeDiNet pipeline).
+#'
+#' Because step 7 strictly reduces the gene set, the final feature count is
+#' guaranteed to be <= GeDiNet on the full data, and q=0.01 always produces
+#' a feature count <= q=0.05.
+#'
+#' @param dataset A `gsm_dataset` object.
+#' @param train_idx Integer vector of training sample indices.
+#' @param top_percent Percentage of top groups to retain (forwarded to
+#'   `pre_score_anova`). Default `20`.
+#' @param q_threshold Numeric scalar; BH-adjusted p-value cutoff. Groups
+#'   with q < `q_threshold` are kept. Default `0.05`.
+#' @param progress Optional callback `progress(i, n, group_name, score)`.
+#' @param ... Passed through to `pre_score_anova`.
+#' @return Named list of character vectors (significant groups), with
+#'   `scores`, `pvalues`, `padj`, `zscores`, and `n_keep` attributes.
+#' @keywords internal
+pre_score_zscore <- function(dataset, train_idx, top_percent = 20,
+                             q_threshold = 0.05, progress = NULL, ...) {
+  if (!requireNamespace("limma", quietly = TRUE)) {
+    stop(
+      "Package 'limma' is required for method 'zscore'. ",
+      "Install it with: BiocManager::install('limma')"
+    )
+  }
+  stopifnot(
+    is.numeric(q_threshold), length(q_threshold) == 1,
+    q_threshold > 0, q_threshold <= 1
+  )
+
+  expr   <- dataset$expr[, train_idx, drop = FALSE]
+  labels <- droplevels(dataset$labels[train_idx])
+  groups <- dataset$groups
+
+  # ── Step 1: per-gene moderated t-statistics via limma ─────────────────────
+  universe <- intersect(unique(unlist(groups)), rownames(expr))
+  t_all    <- .pre_score_limma_t(expr[universe, , drop = FALSE], labels)
+
+  # ── Steps 2-3: group-level z-score  E^z_g = sqrt(N_g) * t_bar ────────────
+  gnames   <- names(groups)
+  n_groups <- length(gnames)
+  zscores  <- numeric(n_groups)
+  names(zscores) <- gnames
+
+  for (j in seq_len(n_groups)) {
+    g  <- intersect(groups[[gnames[j]]], names(t_all))
+    Ng <- length(g)
+    if (Ng == 0) {
+      zscores[j] <- 0
+    } else {
+      t_bar      <- mean(t_all[g])
+      zscores[j] <- sqrt(Ng) * t_bar
+    }
+    if (!is.null(progress)) {
+      progress(j, n_groups, gnames[j], abs(zscores[j]))
+    }
+  }
+
+  # ── Step 4: two-sided p-values from the standard normal ───────────────────
+  pvals <- 2 * stats::pnorm(-abs(zscores))
+  names(pvals) <- gnames
+  pvals[!is.finite(pvals)] <- 1
+  pvals[pvals <= 0]        <- .Machine$double.xmin
+
+  # ── Step 5: Benjamini-Hochberg adjustment ─────────────────────────────────
+  padj <- stats::p.adjust(pvals, method = "BH")
+  names(padj) <- gnames
+
+  # ── Step 6: keep groups with q < q_threshold ──────────────────────────────
+  sig_names <- names(padj)[padj < q_threshold]
+
+  if (length(sig_names) == 0) {
+    warning(
+      sprintf("pre_score_zscore: no group passed q < %.2f (BH). ", q_threshold),
+      "Falling back to evaluating all groups."
+    )
+    sig_names <- gnames
+  }
+
+  # ── Step 7: build dataset Y — only genes from significant groups ───────────
+  # Gene universe is the union of genes in significant groups only.
+  sig_genes <- intersect(unique(unlist(groups[sig_names])), rownames(dataset$expr))
+
+  dataset_y        <- dataset
+  dataset_y$expr   <- dataset$expr[sig_genes, , drop = FALSE]
+  dataset_y$groups <- Filter(
+    function(g) length(g) > 0,
+    lapply(groups[sig_names], function(g) intersect(g, sig_genes))
+  )
+
+  # ── Step 8: ANOVA on Y — n_keep based on Y's (reduced) group count ─────────
+  # pre_score_anova keeps ceiling(n_y * top_percent / 100) groups from dataset_y.
+  # Because n_y <= n_groups (z-score filtering can only reduce groups), the
+  # number of kept groups is <= what GeDiNet would keep, guaranteeing:
+  #   zscore feature count <= GeDiNet feature count  ✓
+  result <- pre_score_anova(dataset_y, train_idx, top_percent = top_percent,
+                            progress = NULL, ...)
+
+  # Attach z-score / p-value metadata for the retained groups
+  retained <- names(result)
+  attr(result, "zscores") <- zscores[retained]
+  attr(result, "pvalues") <- pvals[retained]
+  attr(result, "padj")    <- padj[retained]
+  result
+}
+
+

@@ -48,9 +48,6 @@ shave_genes <- function(expr, labels, train_idx, alpha = 0.05,
   p_adj <- stats::p.adjust(p, method = "BH")
 
   sig_idx <- which(is.finite(p_adj) & p_adj < alpha)
-  if (length(sig_idx) > max_features) {
-    sig_idx <- sig_idx[order(p_adj[sig_idx])[1:max_features]]
-  }
 
   keep <- genes[sig_idx]
   if (length(keep) < 2) genes else keep # safe fallback
