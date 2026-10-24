@@ -229,10 +229,19 @@ build_run_config <- function(input, rv) {
   mccv <- isTRUE(input$run_mccv_mode)
   scoring <- list(
     "Mode" = if (mccv) "Parallel MCCV" else "Single split",
-    "Pre-score" = sprintf(
-      "%s (top %s%%)", input$prescore_method %||% "none",
-      if (identical(input$score_scope, "all")) "100" else input$top_percent
-    ),
+    "Pre-score" = {
+      pm <- input$prescore_method %||% "none"
+      if (identical(pm, "zscore")) {
+        qt <- input$prescore_q_threshold %||% "0.05"
+        tp <- if (identical(input$score_scope, "all")) "100" else input$top_percent
+        sprintf("zscore (BH q < %s, top %s%%)", qt, tp)
+      } else {
+        sprintf(
+          "%s (top %s%%)", pm,
+          if (identical(input$score_scope, "all")) "100" else input$top_percent
+        )
+      }
+    },
     "Group scorer" = classifier_label(input$score_method),
     "Final model" = classifier_label(if (mccv && input$model_method != "same") {
       input$model_method
@@ -1097,7 +1106,7 @@ ui <- page_navbar(
         tags$div(
           style = "display:flex; align-items:center; gap:4px;",
           tags$label("Method"),
-          help_tip("Statistical test to rank groups by differential expression. ANOVA/limma combine per-gene p-values with Fisher's method (biased toward large groups). Fisher (chi-square) calibrates for group size; EBM also corrects for inter-gene correlation; CAMERA is a competitive, correlation-aware gene-set test (two-class only). GSVA scores each group's single-sample enrichment activity (the signal the ML model sees). None skips pre-scoring.")
+          help_tip("Statistical test to rank groups by differential expression. ANOVA/limma combine per-gene p-values with Fisher's method (biased toward large groups). Fisher (chi-square) calibrates for group size; EBM also corrects for inter-gene correlation; CAMERA is a competitive, correlation-aware gene-set test (two-class only). GSVA scores each group's single-sample enrichment activity (the signal the ML model sees). Z-score (limma) aggregates per-gene moderated t-statistics into a group-level z-score and uses BH q-value to select significant groups. None skips pre-scoring.")
         ),
         selectInput("prescore_method", NULL,
           choices = c(
@@ -1107,16 +1116,34 @@ ui <- page_navbar(
             "Empirical Brown (correlation-aware)" = "ebm",
             "CAMERA (competitive, 2-class)" = "camera",
             "GSVA / ssGSEA enrichment" = "gsva",
+            "Z-score (limma t-stat, BH q-value)" = "zscore",
             "None" = "none"
           )
         ),
-        tags$div(
-          style = "display:flex; align-items:center; gap:4px;",
-          tags$label("Top % groups to keep"),
-          help_tip("Percentage of groups passing the pre-score filter. Lower = more selective, faster scoring. 20% is a good default.")
+        # -- Q-value threshold (only shown for zscore method) --
+        conditionalPanel(
+          condition = "input.prescore_method === 'zscore'",
+          tags$div(
+            style = "display:flex; align-items:center; gap:4px;",
+            tags$label("Q-value threshold (BH)"),
+            help_tip("Groups with BH-adjusted p-value (q) below this threshold are considered statistically significant and passed to the scoring step. 0.05 is the standard choice; use 0.01 for stricter filtering.")
+          ),
+          radioButtons("prescore_q_threshold", NULL,
+            choices = c("0.05" = "0.05", "0.01" = "0.01"),
+            selected = "0.05", inline = TRUE
+          )
         ),
-        sliderInput("top_percent", NULL,
-          min = 5, max = 100, value = 20, step = 5
+        # -- Top % slider (hidden only when method is 'none') --
+        conditionalPanel(
+          condition = "input.prescore_method !== 'none'",
+          tags$div(
+            style = "display:flex; align-items:center; gap:4px;",
+            tags$label("Top % groups to keep"),
+            help_tip("Percentage of groups passing the pre-score filter. Lower = more selective, faster scoring. 20% is a good default.")
+          ),
+          sliderInput("top_percent", NULL,
+            min = 5, max = 100, value = 20, step = 5
+          )
         ),
         tags$div(
           style = "display:flex; align-items:center; gap:4px;",
@@ -1124,7 +1151,7 @@ ui <- page_navbar(
           help_tip("Fraction of samples used for training. The rest is held out for validation. 0.7 means 70% train, 30% test.")
         ),
         sliderInput("train_ratio", NULL,
-          min = 0.5, max = 0.9, value = 0.7, step = 0.05
+          min = 0.5, max = 0.9, value = 0.9, step = 0.05
         ),
         tags$div(
           style = "display:flex; align-items:center; gap:4px;",
@@ -1406,7 +1433,8 @@ ui <- page_navbar(
             conditionalPanel(
               "input.shave_genes",
               selectInput("shave_method", "Selection rule",
-                choices = c("BH-FDR threshold" = "fdr", "Top-K genes" = "topk")
+                choices = c("BH-FDR threshold" = "fdr", "Top-K genes" = "topk"),
+                selected = "topk"
               ),
               conditionalPanel(
                 "input.shave_method == 'fdr'",
@@ -1414,7 +1442,7 @@ ui <- page_navbar(
               ),
               conditionalPanel(
                 "input.shave_method == 'topk'",
-                numericInput("shave_k", "Top-K genes to keep", value = 100, min = 2, step = 10)
+                numericInput("shave_k", "Top-K genes to keep", value = 2000, min = 2, step = 10)
               )
             ),
             checkboxInput("normalize_z", "Z-score normalize (per-fold, train-fit)", value = FALSE)
@@ -1434,10 +1462,10 @@ ui <- page_navbar(
           accordion_panel(
             "Cross-validation",
             icon = tags$span("\U0001F501"),
-            checkboxInput("run_mccv_mode", "Multi-Fold MCCV", value = FALSE),
+            checkboxInput("run_mccv_mode", "Multi-Fold MCCV", value = TRUE),
             conditionalPanel(
               "input.run_mccv_mode",
-              numericInput("mccv_iterations", "MCCV Iterations", value = 10, min = 1, max = 500),
+              numericInput("mccv_iterations", "MCCV Iterations", value = 100, min = 1, max = 500),
               sliderInput("mccv_cores", "CPU Cores",
                 min = 1, max = parallel::detectCores(),
                 value = max(1, parallel::detectCores() - 1), step = 1
@@ -1446,7 +1474,7 @@ ui <- page_navbar(
                 choices = c("Same as Scoring" = "same", CLASSIFIER_CHOICES),
                 selected = "same"
               ),
-              sliderInput("mccv_train_ratio", "Training Ratio", min = 0.5, max = 0.9, value = 0.7, step = 0.05)
+              sliderInput("mccv_train_ratio", "Training Ratio", min = 0.5, max = 0.9, value = 0.9, step = 0.05)
             )
           )
         ),
@@ -1904,57 +1932,18 @@ ui <- page_navbar(
           accept = c(".csv", ".tsv", ".gmt", ".txt")
         ),
         tags$hr(),
-        field_label("Classifier", "Machine-learning algorithm used to score each group and build models. Random Forest is robust and gives gene importances; SVM suits small samples; KNN is simple; XGBoost handles complex patterns. The Neural Network (MLP) and Graph Neural Network (GCN) need the 'torch' package — the GCN convolves over BRIDGE's differential network, or a correlation graph with file-based groupings. Applied to every dataset."),
-        selectInput("bp_score_method", NULL, choices = CLASSIFIER_CHOICES),
-        field_label("Pre-scoring", "Fast statistical test that ranks groups so only the strongest go to ML scoring. Computed on the TRAINING split of each fold (no leakage). ANOVA/limma combine per-gene p-values; Fisher (chi-square) calibrates for group size; Empirical Brown also corrects gene-gene correlation; CAMERA is a competitive 2-class test; GSVA scores single-sample enrichment; None keeps all groups."),
-        selectInput("bp_prescore_method", NULL,
-          choices = c(
-            "ANOVA" = "anova", "limma (moderated)" = "limma",
-            "Fisher (chi-square)" = "fisher_chisq",
-            "Empirical Brown" = "ebm",
-            "CAMERA (2-class)" = "camera",
-            "GSVA / ssGSEA" = "gsva", "None" = "none"
-          )
+        tags$div(
+          class = "alert alert-info", role = "alert",
+          style = "font-size:0.85rem; padding:10px 14px; margin-bottom:12px;",
+          tags$strong("\U0001F504 Pipeline parameters inherited"),
+          tags$br(),
+          "Classifier, Pre-scoring, MCCV, Train ratio, Top-N, ",
+          "Gene shaving, Z-normalize etc. are read from the ",
+          tags$strong("Pre-Score"), " and ", tags$strong("GSM"),
+          " tabs. Change them there before clicking Run Batch."
         ),
-        layout_columns(
-          col_widths = c(6, 6),
-          tags$div(
-            field_label("MCCV iters", "Number of Monte-Carlo cross-validation folds per dataset. Each fold makes a fresh random train/test split and runs the full score->rank->model pipeline; results are averaged. More folds = more stable estimates but longer runtime."),
-            numericInput("bp_mccv_iterations", NULL, value = 10, min = 1, max = 500)
-          ),
-          tags$div(
-            field_label("Pre-score top %", "Applied on the TRAINING part only, independently in each MCCV round (fold): groups are ranked by the pre-scoring test on that fold's training split, and only this top fraction is kept before the expensive ML scoring (the held-out test samples are never used). E.g. 20% of 327 groups keeps ~66. Lower = faster, more aggressive filtering; 100% keeps all groups."),
-            numericInput("bp_top_percent", NULL, value = 100, min = 1, max = 100)
-          )
-        ),
-        layout_columns(
-          col_widths = c(6, 6),
-          tags$div(
-            field_label("Train ratio", "Fraction of samples used for training in each fold's random split (e.g. 0.7 = 70% train, 30% held-out test). Pre-scoring, gene shaving, scoring and modeling all use the training part only."),
-            numericInput("bp_train_ratio", NULL, value = 0.7, min = 0.5, max = 0.95, step = 0.05)
-          ),
-          tags$div(
-            field_label("Top-N groups", "Accumulative modeling builds classifiers from the top-1, top-2, ... up to top-N ranked groups, reporting performance at each level. The best k (by Accuracy) is chosen per fold."),
-            numericInput("bp_n_top_groups", NULL, value = 10, min = 1)
-          )
-        ),
-        field_label("Final modeling", "Classifier used to build the final accumulative model from the top-ranked groups. 'Same as scoring' reuses the classifier above; otherwise pick a different algorithm for the modeling step."),
-        selectInput("bp_model_method", NULL,
-          choices = c("Same as scoring" = "same", CLASSIFIER_CHOICES)
-        ),
-        layout_columns(
-          col_widths = c(6, 6),
-          tags$div(
-            style = "display:flex; align-items:center; gap:4px;",
-            checkboxInput("bp_shave", "Gene shaving", value = TRUE),
-            help_tip("Before scoring, drop genes that are not individually differential (Welch t-test + BH FDR on the TRAINING split). Focuses each group on its informative genes.")
-          ),
-          tags$div(
-            style = "display:flex; align-items:center; gap:4px;",
-            checkboxInput("bp_normalize", "Z-normalize", value = FALSE),
-            help_tip("Standardize each gene to mean 0 / SD 1 (fit on training, applied to test). Helps distance-based classifiers (KNN, SVM); usually unnecessary for tree models.")
-          )
-        ),
+        uiOutput("batch_params_summary"),
+        tags$hr(),
         tags$div(
           style = "display:flex; align-items:center; gap:4px;",
           checkboxInput("bp_discover", "Module discovery (per dataset)", value = FALSE),
@@ -2561,7 +2550,8 @@ server <- function(input, output, session) {
           top_groups <- pre_score_groups(ds,
             train_idx = split$train,
             method = input$prescore_method,
-            top_percent = input$top_percent
+            top_percent = input$top_percent,
+            q_threshold = as.numeric(input$prescore_q_threshold %||% 0.05)
           )
           rv$prescore_groups <- top_groups
           rv$prescore_scores <- attr(top_groups, "scores")
@@ -3144,7 +3134,8 @@ server <- function(input, output, session) {
             if (is.null(candidates)) {
               candidates <- pre_score_groups(ds_run, rv$train_idx,
                 method = input$prescore_method,
-                top_percent = input$top_percent
+                top_percent = input$top_percent,
+                q_threshold = as.numeric(input$prescore_q_threshold %||% 0.05)
               )
               auto_prescored <- TRUE
             }
@@ -3269,6 +3260,11 @@ server <- function(input, output, session) {
             n_features = length(final_model$features),
             prescore_method = if (scope_all) "skipped" else input$prescore_method,
             prescore_top_percent = input$top_percent,
+            prescore_q_threshold = if (!scope_all && identical(input$prescore_method, "zscore")) {
+              sprintf("q < %s", input$prescore_q_threshold %||% "0.05")
+            } else {
+              NA_character_
+            },
             seed = input$score_seed,
             dataset = sprintf(
               "%d samples x %d genes",
@@ -3309,6 +3305,7 @@ server <- function(input, output, session) {
             dataset = rv$dataset, train_ratio = input$mccv_train_ratio,
             pre_score_method = input$prescore_method,
             pre_score_top_percent = fold_top_pct,
+            pre_score_q_threshold = as.numeric(input$prescore_q_threshold %||% 0.05),
             score_method = input$score_method, model_method = m_method,
             score_args = score_args, model_args = model_args,
             top_n = input$n_top_groups, shave = isTRUE(input$shave_genes),
@@ -3479,6 +3476,11 @@ server <- function(input, output, session) {
               train_ratio = p$train_ratio,
               prescore_method = p$pre_score_method,
               prescore_top_percent = p$pre_score_top_percent,
+              prescore_q_threshold = if (identical(p$pre_score_method, "zscore")) {
+                sprintf("q < %s", p$pre_score_q_threshold %||% 0.05)
+              } else {
+                NA_character_
+              },
               groups_per_fold = round(mean(groups_per_fold, na.rm = TRUE), 1),
               features_per_fold = round(mean(feats_per_fold, na.rm = TRUE), 1),
               seed = p$seed,
@@ -3531,6 +3533,7 @@ server <- function(input, output, session) {
                     train_ratio = p$train_ratio,
                     pre_score_method = p$pre_score_method,
                     pre_score_top_percent = p$pre_score_top_percent,
+                    pre_score_q_threshold = p$pre_score_q_threshold %||% 0.05,
                     score_method = p$score_method, model_method = p$model_method,
                     score_args = p$score_args, model_args = p$model_args,
                     top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
@@ -3568,6 +3571,7 @@ server <- function(input, output, session) {
                 train_ratio = p$train_ratio,
                 pre_score_method = p$pre_score_method,
                 pre_score_top_percent = p$pre_score_top_percent,
+                pre_score_q_threshold = p$pre_score_q_threshold %||% 0.05,
                 score_method = p$score_method, model_method = p$model_method,
                 score_args = p$score_args, model_args = p$model_args,
                 top_n = p$top_n %||% 10, shave = p$shave %||% TRUE,
@@ -5457,6 +5461,7 @@ server <- function(input, output, session) {
         if (!is.null(settings$top_percent)) updateSliderInput(session, "top_percent", value = as.numeric(settings$top_percent))
         if (!is.null(settings$train_ratio)) updateSliderInput(session, "train_ratio", value = as.numeric(settings$train_ratio))
         if (!is.null(settings$prescore_seed)) updateNumericInput(session, "prescore_seed", value = as.numeric(settings$prescore_seed))
+        if (!is.null(settings$prescore_q_threshold)) updateRadioButtons(session, "prescore_q_threshold", selected = as.character(settings$prescore_q_threshold))
 
         if (!is.null(settings$perm_method)) updateSelectInput(session, "perm_method", selected = settings$perm_method)
         if (!is.null(settings$perm_nperm)) updateNumericInput(session, "perm_nperm", value = as.numeric(settings$perm_nperm))
@@ -5536,6 +5541,7 @@ server <- function(input, output, session) {
             top_percent = input$top_percent,
             train_ratio = input$train_ratio,
             prescore_seed = input$prescore_seed,
+            prescore_q_threshold = input$prescore_q_threshold %||% "0.05",
             perm_method = input$perm_method,
             perm_nperm = input$perm_nperm,
             score_method = input$score_method,
@@ -5786,6 +5792,37 @@ server <- function(input, output, session) {
     updateSelectInput(session, "batch_datasets", selected = character(0))
   })
 
+  # Live summary of inherited pipeline parameters shown in the Batch sidebar.
+  output$batch_params_summary <- renderUI({
+    sc <- input$score_method %||% "rf"
+    ps <- input$prescore_method %||% "anova"
+    it <- input$mccv_iterations %||% 100
+    tp <- input$top_percent %||% 20
+    tr <- input$mccv_train_ratio %||% 0.9
+    ng <- input$n_top_groups %||% 10
+    mm <- input$model_method %||% "same"
+    sh <- input$shave_genes %||% TRUE
+    nz <- input$normalize_z %||% FALSE
+    fa <- input$fdr_alpha %||% 0.05
+    yn <- function(x) if (isTRUE(x)) "\u2705" else "\u274c"
+    tags$div(
+      style = "font-size:0.82rem; background:#1a1a2e; border-radius:6px; padding:8px 12px; margin-bottom:6px;",
+      tags$table(
+        style = "width:100%; border-collapse:collapse;",
+        tags$tr(tags$td("Classifier"), tags$td(style = "text-align:right; font-weight:600;", toupper(sc))),
+        tags$tr(tags$td("Pre-scoring"), tags$td(style = "text-align:right; font-weight:600;", ps)),
+        tags$tr(tags$td("MCCV iters"), tags$td(style = "text-align:right; font-weight:600;", it)),
+        tags$tr(tags$td("Pre-score top %"), tags$td(style = "text-align:right; font-weight:600;", paste0(tp, "%"))),
+        tags$tr(tags$td("Train ratio"), tags$td(style = "text-align:right; font-weight:600;", tr)),
+        tags$tr(tags$td("Top-N groups"), tags$td(style = "text-align:right; font-weight:600;", ng)),
+        tags$tr(tags$td("Final modeling"), tags$td(style = "text-align:right; font-weight:600;", mm)),
+        tags$tr(tags$td("Gene shaving"), tags$td(style = "text-align:right; font-weight:600;", yn(sh))),
+        tags$tr(tags$td("Z-normalize"), tags$td(style = "text-align:right; font-weight:600;", yn(nz))),
+        tags$tr(tags$td("FDR alpha"), tags$td(style = "text-align:right; font-weight:600;", fa))
+      )
+    )
+  })
+
   observeEvent(input$btn_batch, {
     # Datasets = selected examples + uploaded files (mixed).
     sel <- input$batch_datasets
@@ -5830,15 +5867,16 @@ server <- function(input, output, session) {
     }
 
     params <- list(
-      score_method     = input$bp_score_method,
-      prescore_method  = input$bp_prescore_method,
-      mccv_iterations  = input$bp_mccv_iterations,
-      top_percent      = input$bp_top_percent,
-      mccv_train_ratio = input$bp_train_ratio,
-      n_top_groups     = input$bp_n_top_groups,
-      model_method     = input$bp_model_method,
-      shave_genes      = input$bp_shave,
-      normalize_z      = input$bp_normalize,
+      score_method     = input$score_method,
+      prescore_method  = input$prescore_method,
+      mccv_iterations  = input$mccv_iterations,
+      top_percent      = input$top_percent,
+      mccv_train_ratio = input$mccv_train_ratio,
+      n_top_groups     = input$n_top_groups,
+      model_method     = input$model_method,
+      shave_genes      = input$shave_genes,
+      normalize_z      = input$normalize_z,
+      fdr_alpha        = input$fdr_alpha,
       score_seed       = input$bp_seed
     )
     outdir <- file.path(
@@ -5854,9 +5892,10 @@ server <- function(input, output, session) {
         groups_format = groups_fmt
       ),
       error = function(e) {
-        showNotification(paste("Batch init failed:", conditionMessage(e)),
-          type = "error", duration = 10
-        )
+        msg <- paste("Batch init failed:", conditionMessage(e))
+        message("[BATCH ERROR] ", msg) # konsola da yaz
+        message("[BATCH TRACEBACK] ", paste(capture.output(traceback()), collapse = "\n"))
+        showNotification(msg, type = "error", duration = 15)
         NULL
       }
     )

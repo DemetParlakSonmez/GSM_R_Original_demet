@@ -129,6 +129,7 @@ run_pipeline <- function(params = NULL, outdir = ".", discover = TRUE, ...) {
       train_ratio        = p$mccv_train_ratio,
       pre_score_method   = p$prescore_method,
       pre_score_top_percent = p$top_percent,
+      pre_score_q_threshold = p$prescore_q_threshold %||% 0.05,
       score_method       = p$score_method,
       model_method       = actual_model_method,
       score_args         = score_args,
