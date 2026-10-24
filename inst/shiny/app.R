@@ -17,21 +17,46 @@ Sys.setenv(OPENBLAS_NUM_THREADS = "1", OMP_NUM_THREADS = "1",
 # Increase maximum file upload size to 500MB
 options(shiny.maxRequestSize = 500 * 1024^2)
 
+# Dev mode: locate the package root robustly.
+# Strategy 1: caller set GSMR_PKG_DIR (e.g. run-live.sh or our launcher).
+# Strategy 2: walk up from this file's own path (works when source()'d).
+# Strategy 3: walk up from getwd() — works when runApp() is called from the repo root.
+.find_pkg_root <- function() {
+  candidates <- c(
+    Sys.getenv("GSMR_PKG_DIR", unset = NA_character_),
+    tryCatch({
+      frames <- sys.frames()
+      ofiles <- Filter(Negate(is.null),
+                       lapply(frames, function(f) f$ofile))
+      if (length(ofiles))
+        normalizePath(file.path(dirname(ofiles[[length(ofiles)]]), "..", ".."))
+      else NA_character_
+    }, error = function(e) NA_character_),
+    normalizePath(file.path(getwd(), "inst", "shiny", ".."), mustWork = FALSE),
+    normalizePath(file.path(getwd(), "..", ".."), mustWork = FALSE),
+    normalizePath(getwd(), mustWork = FALSE)
+  )
+  for (d in candidates) {
+    if (!is.na(d) && nzchar(d) && file.exists(file.path(d, "DESCRIPTION"))) return(d)
+  }
+  NULL
+}
+app_dir <- .find_pkg_root()
+
 # Load gsmR — either installed or via pkgload
-if (requireNamespace("gsmR", quietly = TRUE)) {
+if (!is.null(app_dir)) {
+  pkgload::load_all(app_dir, quiet = TRUE)
+} else if (requireNamespace("gsmR", quietly = TRUE)) {
   library(gsmR)
 } else {
-  # Dev mode: load from package root
-  app_dir <- normalizePath(file.path(dirname(sys.frame(1)$ofile %||% "."), "..", ".."))
-  if (file.exists(file.path(app_dir, "DESCRIPTION"))) {
-    pkgload::load_all(app_dir)
-  }
+  warning("gsmR package not found and could not locate package root for dev mode. ",
+          "Run the app from the package root directory.")
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Discover example datasets (repo-level example_*_files/ + bundled toy data)
 # ══════════════════════════════════════════════════════════════════════════════
-.launch_dir <- getOption("gsmR.launch_dir", getwd())
+.launch_dir <- getOption("gsmR.launch_dir", if (!is.null(app_dir)) app_dir else getwd())
 .example_input_dir  <- getOption("gsmR.example_input_dir",
                                  file.path(.launch_dir, "example_input_files"))
 .example_groups_dir <- getOption("gsmR.example_groups_dir",
@@ -833,7 +858,9 @@ ui <- page_navbar(
                                       "Prior-graph genes only" = "prior")),
               layout_columns(col_widths = c(6, 6),
                 selectInput("g_bridge_precision", "Estimator",
-                            choices = c("glasso" = "glasso", "mb / fast" = "mb")),
+                            choices = c("glasso (prior-weighted, \u2264250 genes)" = "glasso",
+                                        "jgl (fused joint estimation)" = "jgl",
+                                        "mb / fast (large p)" = "mb")),
                 numericInput("g_bridge_max_genes", "Max genes", value = 1000, min = 10, step = 50)
               ),
               tags$details(
@@ -1097,7 +1124,9 @@ ui <- page_navbar(
                 fileInput("gsm_grp_bridge_prior_file", "Prior file",
                           accept = c(".csv", ".tsv", ".gmt", ".txt"))),
               selectInput("gsm_grp_bridge_precision", "Estimator",
-                          choices = c("mb / fast" = "mb", "glasso" = "glasso")),
+                          choices = c("mb / fast" = "mb",
+                                      "glasso (prior-weighted, \u2264250 genes)" = "glasso",
+                                      "jgl (fused joint)" = "jgl")),
               selectInput("gsm_grp_bridge_prefilter", "Speed pre-filter",
                           choices = c("Top-variance" = "variance",
                                       "Prior genes" = "prior", "None" = "none")),
@@ -1444,6 +1473,13 @@ ui <- page_navbar(
                          "Tip: downloads don't work in VS Code's Simple Browser — use ",
                          tags$b("Save to workspace folder"), ", or open the app in a real browser tab."),
               uiOutput("save_disk_path")
+            ),
+            conditionalPanel(
+              condition = "output.has_timings",
+              card(full_screen = TRUE,
+                card_header("\U23F1\UFE0F Recorded Step Runtimes (Exported to 'Timings' Excel sheet)"),
+                DTOutput("export_timings_table")
+              )
             )
           )
         )
@@ -1679,7 +1715,15 @@ server <- function(input, output, session) {
     detect        = NULL,
 
     # Group significance (permutation test)
-    permtest      = NULL
+    permtest      = NULL,
+
+    # Operation timings (collected across the session, written to Timings sheet)
+    # Named list with fields:
+    #   data_load      : seconds for Data -> Load Selected Example
+    #   grouping_load  : seconds for Grouping -> Prior knowledge -> Load grouping
+    #   bridge_runs    : named list (estimator -> seconds) for BRIDGE runs
+    #   gsm_run        : seconds for GSM -> Run Analysis
+    timings       = list()
   )
 
   # Chunked pre-scoring worker state (drives the live main-panel view).
@@ -1878,7 +1922,13 @@ server <- function(input, output, session) {
 
   observeEvent(input$btn_load, {
     req(input$expr_file)
+    t0_data <- Sys.time()
     load_into_rv(input$expr_file$datapath)
+    elapsed_data <- as.numeric(difftime(Sys.time(), t0_data, units = "secs"))
+    timings_cur <- rv$timings %||% list()
+    timings_cur$data_load <- elapsed_data
+    timings_cur$data_load_detail <- "Load & Validate (Uploaded expression)"
+    rv$timings <- timings_cur
   })
 
   # ── Filter summary (before/after gene counts) ────────────────────────────
@@ -1901,7 +1951,13 @@ server <- function(input, output, session) {
       showNotification(paste("\u274C Expression file not found:", expr_sel),
                        type = "error", duration = 10); return()
     }
+    t0_data <- Sys.time()
     load_into_rv(expr_path)
+    elapsed_data <- as.numeric(difftime(Sys.time(), t0_data, units = "secs"))
+    timings_cur <- rv$timings %||% list()
+    timings_cur$data_load <- elapsed_data
+    timings_cur$data_load_detail <- "Load Selected Example"
+    rv$timings <- timings_cur
   })
 
   # Value boxes
@@ -2512,10 +2568,20 @@ server <- function(input, output, session) {
         ds_run <- rv$dataset
         if (!is.null(rv$dataset$grouping_spec) &&
             identical(rv$dataset$grouping_spec$method, "bridge")) {
+          t0_bridge_single <- Sys.time()
           withProgress(message = "BRIDGE grouping (training samples only)...",
                        value = 0.2, {
             ds_run$groups <- grouping_for_fold(rv$dataset, rv$train_idx)
           })
+          elapsed_bridge_single <- as.numeric(difftime(Sys.time(), t0_bridge_single, units = "secs"))
+          timings_cur <- rv$timings %||% list()
+          br <- timings_cur$bridge_runs %||% list()
+          est_lbl <- rv$dataset$grouping_spec$args$precision %||% "bridge"
+          if (is.null(br[[est_lbl]])) {
+            br[[est_lbl]] <- elapsed_bridge_single
+            timings_cur$bridge_runs <- br
+            rv$timings <- timings_cur
+          }
           validate(need(length(ds_run$groups) > 0,
                         "BRIDGE derived no groups on the training split. Lower tau or min group size."))
           ds_run$params$n_groups <- length(ds_run$groups)
@@ -2567,7 +2633,10 @@ server <- function(input, output, session) {
               list(expr = expr_use, labels = rv$dataset$labels,
                    genes = candidates[[gname]], train_idx = rv$train_idx,
                    method = input$score_method), score_args))
-            results[[gname]] <- list(accuracy = scores[i])
+            # Store gene list so export tables can report N_genes in BRIDGE mode
+            # (dataset$groups is empty when grouping is BRIDGE per-fold)
+            results[[gname]] <- list(accuracy = scores[i],
+                                     genes = candidates[[gname]])
           }
           ranked <- names(sort(scores, decreasing = TRUE))
 
@@ -2632,6 +2701,10 @@ server <- function(input, output, session) {
                             rv$dataset$params$n_samples, rv$dataset$params$n_genes)
         )
         rv$time_score <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+        # Record GSM run timing.
+        timings_cur <- rv$timings %||% list()
+        timings_cur$gsm_run <- rv$time_score
+        rv$timings <- timings_cur
         showNotification(sprintf("✅ Accumulative top-1..%d done (best k = %d) in %s!",
                                  K, best_k, format_duration(rv$time_score)),
                          type = "message")
@@ -2809,6 +2882,10 @@ server <- function(input, output, session) {
         )
         rv$scored <- TRUE
         rv$time_score <- as.numeric(difftime(Sys.time(), mc$t0, units = "secs"))
+        # Record GSM run timing.
+        timings_cur <- rv$timings %||% list()
+        timings_cur$gsm_run <- rv$time_score
+        rv$timings <- timings_cur
         # Snapshot for the persistent completion banner (stays until dismissed).
         mc_metrics <- colMeans(metrics_df, na.rm = TRUE)
         mc$last_summary <- list(
@@ -3441,7 +3518,8 @@ server <- function(input, output, session) {
 
   .do_export <- function(file, fmt) {
     tryCatch({
-      tbls <- gsm_export_tables(assemble_result(), rv$dataset, rv$score_summary)
+      tbls <- gsm_export_tables(assemble_result(), rv$dataset, rv$score_summary,
+                                timings = rv$timings %||% list())
       if (fmt == "xlsx") {
         gsm_write_xlsx(tbls, file)
       } else {
@@ -3475,10 +3553,17 @@ server <- function(input, output, session) {
   # writes the workbook + CSV bundle into a "gsm_outputs/" folder in the project.
   observeEvent(input$save_disk, {
     req(rv$scored)
-    out_dir <- file.path(getOption("gsmR.launch_dir", getwd()), "gsm_outputs")
+    base_dir <- getOption("gsmR.launch_dir", NULL)
+    if (is.null(base_dir)) {
+      if (file.exists("DESCRIPTION")) base_dir <- getwd()
+      else if (file.exists("../../DESCRIPTION")) base_dir <- normalizePath("../..")
+      else base_dir <- getwd()
+    }
+    out_dir <- file.path(base_dir, "gsm_outputs")
     tryCatch({
       dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-      tbls   <- gsm_export_tables(assemble_result(), rv$dataset, rv$score_summary)
+      tbls   <- gsm_export_tables(assemble_result(), rv$dataset, rv$score_summary,
+                                  timings = rv$timings %||% list())
       xlsx_f <- file.path(out_dir, gsm_export_filename(rv$score_summary, rv$dataset, "xlsx"))
       zip_f  <- file.path(out_dir, gsm_export_filename(rv$score_summary, rv$dataset, "zip"))
       gsm_write_xlsx(tbls, xlsx_f)
@@ -3507,6 +3592,18 @@ server <- function(input, output, session) {
     req(rv$scored, rv$time_score)
     lbl <- if (isTRUE(input$run_mccv_mode)) "Parallel MCCV runtime" else "Scoring + model runtime"
     time_banner_ui(rv$time_score, lbl)
+  })
+
+  output$has_timings <- reactive({
+    !is.null(rv$timings) && length(rv$timings) > 0
+  })
+  outputOptions(output, "has_timings", suspendWhenHidden = FALSE)
+
+  output$export_timings_table <- renderDT({
+    req(rv$timings)
+    tbl <- gsm_tbl_timings(rv$timings)
+    req(!is.null(tbl) && nrow(tbl) > 0)
+    .dt(tbl, page = 10)
   })
 
   # Single Fold Renderers: Group Scores Table
@@ -3685,10 +3782,16 @@ server <- function(input, output, session) {
             else file.path(.example_input_dir, sel)
     if (is.null(path) || !nzchar(path) || !file.exists(path))
       return(showNotification("❌ Expression file not found.", type = "error", duration = 8))
+    t0_data <- Sys.time()
     tryCatch({
       ed <- withProgress(message = "Loading expression…", value = 0.4,
                          read_expression(path))
       rv$expr_data <- ed
+      elapsed_data <- as.numeric(difftime(Sys.time(), t0_data, units = "secs"))
+      timings_cur <- rv$timings %||% list()
+      timings_cur$data_load <- elapsed_data
+      timings_cur$data_load_detail <- if (src_upload) "Uploaded expression (Grouping tab)" else "Load Selected Example (Grouping tab)"
+      rv$timings <- timings_cur
       rv$g_file <- NULL; rv$g_bridge <- NULL           # clear stale results
       showNotification(sprintf("✅ Loaded %d samples × %d genes.",
                                ncol(ed$expr), nrow(ed$expr)), type = "message")
@@ -3709,6 +3812,7 @@ server <- function(input, output, session) {
   observeEvent(input$g_file_run, {
     req(rv$expr_data)
     src <- input$g_file_source %||% "example"
+    t0_gload <- Sys.time()
     tryCatch({
       groups <- if (src == "example") {
         .g_read_example_groups(input$g_file_example %||% "")
@@ -3719,6 +3823,10 @@ server <- function(input, output, session) {
                          format = input$g_file_format)
       }
       rv$g_file <- list(groups = groups)
+      elapsed_gload <- as.numeric(difftime(Sys.time(), t0_gload, units = "secs"))
+      timings_cur <- rv$timings %||% list()
+      timings_cur$grouping_load <- elapsed_gload
+      rv$timings <- timings_cur
       showNotification(sprintf("✅ Loaded %d group(s).", length(groups)), type = "message")
     }, error = function(e)
       showNotification(paste("❌", e$message), type = "error", duration = 10))
@@ -3772,6 +3880,8 @@ server <- function(input, output, session) {
                         progress_file = pfile), args)
     rv$g_bridge <- NULL
     gbr$prior <- prior_obj; gbr$args <- args; gbr$progress_file <- pfile
+    # Capture estimator label and start time for timing records.
+    gbr$estimator <- input$g_bridge_precision %||% "unknown"
     gbr$t0 <- Sys.time(); gbr$tick <- 0; gbr$active <- TRUE
 
     if (.Platform$OS.type != "windows") {
@@ -3793,6 +3903,14 @@ server <- function(input, output, session) {
     err <- attr(res, "bridge_error")
     if (!is.null(err))
       return(showNotification(paste("❌", err), type = "error", duration = 12))
+    # Record timing under the estimator label.
+    elapsed_bridge <- as.numeric(difftime(Sys.time(), gbr$t0, units = "secs"))
+    estimator_lbl  <- gbr$estimator %||% "unknown"
+    timings_cur <- rv$timings %||% list()
+    bridge_runs <- timings_cur$bridge_runs %||% list()
+    bridge_runs[[estimator_lbl]] <- elapsed_bridge
+    timings_cur$bridge_runs <- bridge_runs
+    rv$timings <- timings_cur
     if (length(res) == 0)
       return(showNotification("BRIDGE produced no groups — lower tau/min size or adjust lambda.",
                               type = "warning", duration = 10))
@@ -3978,6 +4096,7 @@ server <- function(input, output, session) {
     method <- input$gsm_grp_method %||% "file"
 
     if (method == "file") {
+      t0_gload <- Sys.time()
       groups <- tryCatch({
         if ((input$gsm_grp_file_source %||% "example") == "example")
           .g_read_example_groups(input$gsm_grp_file_example %||% "")
@@ -3987,6 +4106,10 @@ server <- function(input, output, session) {
         }
       }, error = function(e) { showNotification(paste("❌", e$message), type = "error", duration = 10); NULL })
       if (is.null(groups)) return()
+      elapsed_gload <- as.numeric(difftime(Sys.time(), t0_gload, units = "secs"))
+      timings_cur <- rv$timings %||% list()
+      timings_cur$grouping_load <- elapsed_gload
+      rv$timings <- timings_cur
       .commit_dataset(groups, NULL, sprintf("prior-knowledge (%d groups)", length(groups)))
 
     } else {  # BRIDGE — commit the deferred spec (re-derived per fold)
@@ -4397,6 +4520,7 @@ server <- function(input, output, session) {
         accumulative = rv$accumulative, mccv_results = rv$mccv_results,
         scored = rv$scored, score_summary = rv$score_summary,
         time_score = rv$time_score,
+        timings = rv$timings,
         detect = rv$detect, permtest = rv$permtest,
         mccv_group_summary = rv$mccv_group_summary,
         settings = list(
@@ -4467,6 +4591,7 @@ server <- function(input, output, session) {
       rv$scored           <- sess$scored %||% FALSE
       rv$score_summary    <- sess$score_summary
       rv$time_score       <- sess$time_score
+      rv$timings          <- sess$timings %||% list()
       rv$detect           <- sess$detect
       rv$permtest         <- sess$permtest
       rv$mccv_group_summary <- sess$mccv_group_summary

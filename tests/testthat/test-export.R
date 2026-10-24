@@ -103,3 +103,30 @@ test_that("single-fold export produces the reduced table set", {
   expect_equal(nrow(tbls$GroupScores), 2L)
   expect_equal(tbls$GroupScores$Group[1], "GroupA")  # sorted by accuracy
 })
+
+test_that("export with timings adds Timings sheet and parameters", {
+  ds <- structure(
+    list(groups = list(GroupA = c("g1", "g2")),
+         params = list(n_samples = 10L, n_genes = 2L, n_groups = 1L)),
+    class = "gsm_dataset"
+  )
+  result <- list(
+    score_results = list(GroupA = list(accuracy = 0.9)),
+    final_model = list(
+      metrics = list(Accuracy = 0.9),
+      features = c("g1", "g2"), importance = c(g1 = 1, g2 = 1)
+    )
+  )
+  timings <- list(
+    data_load = 1.25,
+    grouping_load = 0.5,
+    bridge_runs = list(glasso = 5.2),
+    gsm_run = 2.1
+  )
+  tbls <- gsm_export_tables(result, ds, timings = timings)
+  expect_true("Timings" %in% names(tbls))
+  expect_equal(names(tbls)[2], "Timings")
+  expect_equal(nrow(tbls$Timings), 4L)
+  expect_true(any(grepl("timing_bridge_glasso_sec", tbls$RunSummary$Parameter)))
+})
+
