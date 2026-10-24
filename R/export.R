@@ -22,8 +22,28 @@ NULL
 }
 
 # Number of genes in a group (0 if unknown).
-.n_genes <- function(dataset, g) {
-  length(dataset$groups[[g]] %|null|% character(0))
+# For BRIDGE mode dataset$groups is empty; fall back to fold-level group_sizes.
+.n_genes <- function(dataset, g, fold_sizes = NULL) {
+  n <- length(dataset$groups[[g]] %|null|% character(0))
+  if (n == 0 && !is.null(fold_sizes) && !is.null(fold_sizes[[g]])) {
+    n <- as.integer(round(mean(fold_sizes[[g]])))
+  }
+  n
+}
+
+# Collect per-group size vectors from MCCV fold results (BRIDGE: fold-local).
+.fold_group_sizes <- function(folds) {
+  ok <- .ok_folds(folds)
+  if (length(ok) == 0) return(NULL)
+  out <- list()
+  for (f in ok) {
+    gs <- f$group_sizes
+    if (is.null(gs) || length(gs) == 0) next
+    for (g in names(gs)) {
+      out[[g]] <- c(out[[g]], as.integer(gs[[g]]))
+    }
+  }
+  out
 }
 
 # ── MCCV table builders ──────────────────────────────────────────────────────
@@ -32,16 +52,23 @@ NULL
 #' @keywords internal
 gsm_tbl_iteration_group_scores <- function(folds, dataset) {
   ok <- .ok_folds(folds)
+  fold_sizes <- .fold_group_sizes(folds)
   rows <- lapply(ok, function(f) {
     accs <- f$group_accuracies
     if (length(accs) == 0) return(NULL)
     g <- names(accs)
+    # For BRIDGE: use fold-specific group_sizes when available
+    n_genes_vec <- if (!is.null(f$group_sizes) && length(f$group_sizes) > 0) {
+      vapply(g, function(x) as.integer(f$group_sizes[[x]] %|null|% 0L), integer(1))
+    } else {
+      vapply(g, function(x) .n_genes(dataset, x, fold_sizes), integer(1))
+    }
     data.frame(
       Iteration    = f$fold,
       Group        = g,
       Accuracy     = round(as.numeric(accs), 6),
       Rank_in_fold = rank(-as.numeric(accs), ties.method = "min"),
-      N_genes      = vapply(g, function(x) .n_genes(dataset, x), integer(1)),
+      N_genes      = n_genes_vec,
       stringsAsFactors = FALSE
     )
   })
@@ -90,6 +117,10 @@ gsm_tbl_group_ranking <- function(folds, dataset, top_n = 10) {
   groups <- sort(unique(long$Group))
   agg <- lapply(groups, function(g) {
     sub <- long[long$Group == g, , drop = FALSE]
+    # Use the maximum observed N_genes (most representative fold) when
+    # dataset$groups is empty (BRIDGE per-fold mode).
+    n_genes_val <- max(sub$N_genes, na.rm = TRUE)
+    if (!is.finite(n_genes_val)) n_genes_val <- NA_integer_
     data.frame(
       Group           = g,
       Times_Selected  = nrow(sub),
@@ -99,7 +130,7 @@ gsm_tbl_group_ranking <- function(folds, dataset, top_n = 10) {
       Mean_Accuracy   = round(mean(sub$Accuracy), 4),
       SD_Accuracy     = round(stats::sd(sub$Accuracy), 4),
       Mean_Rank       = round(mean(sub$Rank_in_fold), 2),
-      N_genes         = sub$N_genes[1],
+      N_genes         = as.integer(n_genes_val),
       stringsAsFactors = FALSE
     )
   })
@@ -176,13 +207,37 @@ gsm_tbl_metric_summary <- function(result) {
 
 #' Group <-> feature associations over all iterations
 #' (mirrors `Groups_Features_Associations_over_all_iterations.csv`).
+#' For BRIDGE mode (dataset$groups empty), gene membership is reconstructed
+#' from the per-fold importance vectors (genes in the best model for that fold).
 #' @keywords internal
 gsm_tbl_group_feature_assoc <- function(folds, dataset) {
   ok <- .ok_folds(folds)
   sel <- table(unlist(lapply(ok, function(f) names(f$group_accuracies))))
   if (length(sel) == 0) return(NULL)
+
+  bridge_mode <- length(dataset$groups) == 0
+
+  # Build a group -> representative gene set mapping.
+  # Fixed grouping: directly from dataset$groups.
+  # BRIDGE: collect the union of importance-gene names per group across folds.
+  if (bridge_mode) {
+    grp_genes <- list()
+    for (f in ok) {
+      imp_f <- f$importance
+      if (is.null(imp_f) || length(imp_f) == 0) next
+      g_names <- names(f$group_accuracies)
+      for (g in g_names) {
+        grp_genes[[g]] <- union(grp_genes[[g]], names(imp_f))
+      }
+    }
+  }
+
   rows <- lapply(names(sel), function(g) {
-    genes <- dataset$groups[[g]] %|null|% character(0)
+    genes <- if (bridge_mode) {
+      grp_genes[[g]] %|null|% character(0)
+    } else {
+      dataset$groups[[g]] %|null|% character(0)
+    }
     if (length(genes) == 0) return(NULL)
     data.frame(Group = g, Gene = genes,
                Times_Group_Selected = as.integer(sel[[g]]),
@@ -210,23 +265,64 @@ gsm_tbl_pre_score_significance <- function(folds) {
 #' Ranked features over all iterations (mirrors `rankedFeatures`).
 #' Uses true RandomForest importance (MeanDecreaseGini) when available;
 #' always includes selection-frequency context.
+#' For BRIDGE mode (dataset$groups empty), gene membership is reconstructed
+#' from per-fold importance keys and group_sizes metadata.
 #' @keywords internal
 gsm_tbl_ranked_features <- function(folds, dataset) {
   ok <- .ok_folds(folds)
   if (length(ok) == 0) return(NULL)
+
+  bridge_mode <- length(dataset$groups) == 0
 
   # Long (gene, group, accuracy) over every selected group in every fold.
   rows <- lapply(ok, function(f) {
     accs <- f$group_accuracies
     if (length(accs) == 0) return(NULL)
     do.call(rbind, lapply(names(accs), function(g) {
-      genes <- dataset$groups[[g]] %|null|% character(0)
+      # Fixed grouping: get genes from dataset
+      if (!bridge_mode) {
+        genes <- dataset$groups[[g]] %|null|% character(0)
+        if (length(genes) == 0) return(NULL)
+        return(data.frame(Gene = genes, Group = g,
+                          Accuracy = as.numeric(accs[[g]]),
+                          stringsAsFactors = FALSE))
+      }
+      # BRIDGE mode: genes come from this fold's importance vector
+      # (the final-model importance covers the union of top-k groups' genes)
+      imp_f <- f$importance
+      if (!is.null(imp_f) && length(imp_f) > 0) {
+        genes <- names(imp_f)
+      } else {
+        return(NULL)
+      }
       if (length(genes) == 0) return(NULL)
       data.frame(Gene = genes, Group = g,
-                 Accuracy = as.numeric(accs[[g]]), stringsAsFactors = FALSE)
+                 Accuracy = as.numeric(accs[[g]]),
+                 stringsAsFactors = FALSE)
     }))
   })
   long <- do.call(rbind, rows)
+
+  # BRIDGE fallback: if importance keys were empty, use the fold-importance
+  # vector directly (one row per gene, ignoring group association)
+  if ((is.null(long) || nrow(long) == 0) && bridge_mode) {
+    imp_list_all <- Filter(Negate(is.null), lapply(ok, `[[`, "importance"))
+    if (length(imp_list_all) == 0) return(NULL)
+    all_imp_vec <- do.call(c, imp_list_all)
+    genes <- sort(unique(names(all_imp_vec)))
+    by_gene <- tapply(as.numeric(all_imp_vec), names(all_imp_vec), mean)
+    out <- data.frame(
+      Gene = genes,
+      Mean_Importance = round(as.numeric(by_gene[genes]), 5),
+      Times_In_Selected_Group = NA_integer_,
+      N_Groups_Containing = NA_integer_,
+      Mean_Group_Accuracy = NA_real_,
+      stringsAsFactors = FALSE
+    )
+    return(out[order(-replace(out$Mean_Importance,
+                              is.na(out$Mean_Importance), -Inf)), , drop = FALSE])
+  }
+
   if (is.null(long) || nrow(long) == 0) return(NULL)
 
   genes <- sort(unique(long$Gene))
@@ -261,7 +357,7 @@ gsm_tbl_ranked_features <- function(folds, dataset) {
 
 #' Run summary / parameters as a key-value table.
 #' @keywords internal
-gsm_tbl_run_summary <- function(summary, dataset = NULL) {
+gsm_tbl_run_summary <- function(summary, dataset = NULL, timings = NULL) {
   s <- summary %|null|% list()
   if (length(s) == 0 && !is.null(dataset)) {
     s <- list(dataset = sprintf("%d samples x %d genes",
@@ -273,23 +369,133 @@ gsm_tbl_run_summary <- function(summary, dataset = NULL) {
   out <- data.frame(Parameter = names(flat), Value = unname(flat),
                     stringsAsFactors = FALSE)
   ver <- tryCatch(as.character(utils::packageVersion("gsmR")), error = function(e) NA)
-  rbind(out,
+  out <- rbind(out,
         data.frame(Parameter = c("gsmR_version", "exported_at"),
                    Value = c(ver, format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
                    stringsAsFactors = FALSE))
+
+  # Also include elapsed runtimes in the parameter summary for completeness
+  if (!is.null(timings) && length(timings) > 0) {
+    if (!is.null(timings$data_load)) {
+      out <- rbind(out, data.frame(Parameter = "timing_data_load_sec",
+                                   Value = sprintf("%.3f", as.numeric(timings$data_load)),
+                                   stringsAsFactors = FALSE))
+    }
+    if (!is.null(timings$grouping_load)) {
+      out <- rbind(out, data.frame(Parameter = "timing_grouping_load_sec",
+                                   Value = sprintf("%.3f", as.numeric(timings$grouping_load)),
+                                   stringsAsFactors = FALSE))
+    }
+    if (!is.null(timings$bridge_runs) && length(timings$bridge_runs) > 0) {
+      for (nm in names(timings$bridge_runs)) {
+        out <- rbind(out, data.frame(Parameter = sprintf("timing_bridge_%s_sec", nm),
+                                     Value = sprintf("%.3f", as.numeric(timings$bridge_runs[[nm]])),
+                                     stringsAsFactors = FALSE))
+      }
+    }
+    if (!is.null(timings$gsm_run)) {
+      out <- rbind(out, data.frame(Parameter = "timing_gsm_run_sec",
+                                   Value = sprintf("%.3f", as.numeric(timings$gsm_run)),
+                                   stringsAsFactors = FALSE))
+    }
+  }
+  out
+}
+
+#' Timing summary table — one row per timed operation.
+#'
+#' @param timings A named list produced by the Shiny app:
+#'   \describe{
+#'     \item{data_load}{Elapsed seconds for \strong{Data} → Load Selected Example.}
+#'     \item{grouping_load}{Elapsed seconds for \strong{Grouping → Prior knowledge} → Load grouping.}
+#'     \item{bridge_runs}{A named list of elapsed seconds, one element per BRIDGE estimator run
+#'       (names are the estimator labels, e.g. \code{"glasso"}, \code{"jgl"}, \code{"mb"}).}
+#'     \item{gsm_run}{Elapsed seconds for \strong{GSM} → Run Analysis.}
+#'   }
+#' @return A data.frame with columns \code{Step}, \code{Detail}, \code{Elapsed_sec},
+#'   \code{Elapsed_formatted}. Returns \code{NULL} when \code{timings} is empty/NULL.
+#' @keywords internal
+gsm_tbl_timings <- function(timings) {
+  if (is.null(timings) || length(timings) == 0) return(NULL)
+
+  fmt_sec <- function(s) {
+    if (is.null(s) || is.na(s)) return(NA_character_)
+    s <- as.numeric(s)
+    if (s < 60)  return(sprintf("%.1f sec", s))
+    if (s < 3600) return(sprintf("%d min %d sec", as.integer(s %/% 60), as.integer(s %% 60)))
+    return(sprintf("%d h %d min", as.integer(s %/% 3600), as.integer((s %% 3600) %/% 60)))
+  }
+
+  rows <- list()
+
+  # 1. Data → Load Selected Example
+  if (!is.null(timings$data_load)) {
+    rows[[length(rows) + 1L]] <- data.frame(
+      Step              = "Data",
+      Detail            = timings$data_load_detail %|null|% "Load Selected Example",
+      Elapsed_sec       = round(as.numeric(timings$data_load), 3),
+      Elapsed_formatted = fmt_sec(timings$data_load),
+      stringsAsFactors  = FALSE)
+  }
+
+  # 2. Grouping → Prior knowledge → Load grouping
+  if (!is.null(timings$grouping_load)) {
+    rows[[length(rows) + 1L]] <- data.frame(
+      Step              = "Grouping – Prior knowledge",
+      Detail            = "Load grouping",
+      Elapsed_sec       = round(as.numeric(timings$grouping_load), 3),
+      Elapsed_formatted = fmt_sec(timings$grouping_load),
+      stringsAsFactors  = FALSE)
+  }
+
+  # 3. Grouping → BRIDGE → Run BRIDGE grouping (one row per estimator run)
+  bridge_runs <- timings$bridge_runs
+  if (!is.null(bridge_runs) && length(bridge_runs) > 0) {
+    for (nm in names(bridge_runs)) {
+      lbl <- switch(nm,
+                    "mb"     = "mb / fast",
+                    "glasso" = "glasso",
+                    "jgl"    = "jgl",
+                    nm)
+      rows[[length(rows) + 1L]] <- data.frame(
+        Step              = "Grouping – BRIDGE",
+        Detail            = sprintf("Run BRIDGE grouping (estimator: %s)", lbl),
+        Elapsed_sec       = round(as.numeric(bridge_runs[[nm]]), 3),
+        Elapsed_formatted = fmt_sec(bridge_runs[[nm]]),
+        stringsAsFactors  = FALSE)
+    }
+  }
+
+  # 4. GSM → Run Analysis
+  if (!is.null(timings$gsm_run)) {
+    rows[[length(rows) + 1L]] <- data.frame(
+      Step              = "GSM",
+      Detail            = "Run Analysis",
+      Elapsed_sec       = round(as.numeric(timings$gsm_run), 3),
+      Elapsed_formatted = fmt_sec(timings$gsm_run),
+      stringsAsFactors  = FALSE)
+  }
+
+  if (length(rows) == 0) return(NULL)
+  do.call(rbind, rows)
 }
 
 # ── Single-fold table builders ───────────────────────────────────────────────
 
-.single_tables <- function(result, dataset, summary) {
+.single_tables <- function(result, dataset, summary, timings = NULL) {
   sr <- result$score_results
   fm <- result$final_model
   accs <- vapply(sr, function(x) as.numeric(x$accuracy), numeric(1))
   g <- names(sr)
+  # BRIDGE: dataset$groups empty — try to read N_genes from score_results entries
   group_scores <- data.frame(
     Rank = rank(-accs, ties.method = "min"),
     Group = g, Accuracy = round(accs, 6),
-    N_genes = vapply(g, function(x) .n_genes(dataset, x), integer(1)),
+    N_genes = vapply(g, function(x) {
+      n <- .n_genes(dataset, x)
+      if (n == 0 && !is.null(sr[[x]]$genes)) n <- length(sr[[x]]$genes)
+      n
+    }, integer(1)),
     stringsAsFactors = FALSE
   )
   group_scores <- group_scores[order(group_scores$Rank), , drop = FALSE]
@@ -303,15 +509,24 @@ gsm_tbl_run_summary <- function(summary, dataset = NULL) {
   feats <- fm$features %|null|% character(0)
   imp <- fm$importance
   feat_imp <- if (!is.null(imp)) as.numeric(imp[feats]) else rep(NA_real_, length(feats))
-  ngrp <- vapply(feats, function(x)
-    sum(vapply(dataset$groups, function(gg) x %in% gg, logical(1))), integer(1))
+  # BRIDGE: dataset$groups empty — count groups from score_results gene membership
+  bridge_mode_single <- length(dataset$groups) == 0
+  ngrp <- if (!bridge_mode_single) {
+    vapply(feats, function(x)
+      sum(vapply(dataset$groups, function(gg) x %in% gg, logical(1))), integer(1))
+  } else {
+    # Build a local gene->group membership from sr$genes
+    vapply(feats, function(x) {
+      sum(vapply(sr, function(s) !is.null(s$genes) && x %in% s$genes, logical(1)))
+    }, integer(1))
+  }
   feature_list <- data.frame(
     Gene = feats, Mean_Importance = round(feat_imp, 5),
     N_Groups_Containing = ngrp, stringsAsFactors = FALSE
   )
 
   out <- list(
-    RunSummary   = gsm_tbl_run_summary(summary, dataset),
+    RunSummary   = gsm_tbl_run_summary(summary, dataset, timings = timings),
     FinalMetrics = final_metrics,
     GroupScores  = group_scores,
     FeatureList  = feature_list
@@ -336,16 +551,31 @@ gsm_tbl_run_summary <- function(summary, dataset = NULL) {
 #' @param dataset The `gsm_dataset` that was scored.
 #' @param summary Optional named list of run metadata (classifier, params, ...).
 #' @param top_n Top-N cutoff used for the group ranking table. Default 10.
+#' @param timings Optional named list of elapsed-time values collected by the
+#'   Shiny app (see [gsm_tbl_timings()]). When supplied, a \code{Timings} sheet
+#'   is added as the second sheet of the workbook, right after \code{RunSummary}.
 #' @return A named list of data.frames (each becomes a sheet / CSV).
 #' @export
-gsm_export_tables <- function(result, dataset, summary = NULL, top_n = 10) {
+gsm_export_tables <- function(result, dataset, summary = NULL, top_n = 10,
+                              timings = NULL) {
   stopifnot(inherits(dataset, "gsm_dataset"))
   if (is.null(result$folds)) {
-    return(.single_tables(result, dataset, summary))
+    tbls <- .single_tables(result, dataset, summary, timings = timings)
+    timing_tbl <- gsm_tbl_timings(timings)
+    if (!is.null(timing_tbl)) {
+      # Insert Timings right after RunSummary
+      pos <- which(names(tbls) == "RunSummary")
+      if (length(pos)) {
+        tbls <- append(tbls, list(Timings = timing_tbl), after = pos)
+      } else {
+        tbls <- c(list(Timings = timing_tbl), tbls)
+      }
+    }
+    return(tbls)
   }
   folds <- result$folds
   tbls <- list(
-    RunSummary            = gsm_tbl_run_summary(summary, dataset),
+    RunSummary            = gsm_tbl_run_summary(summary, dataset, timings = timings),
     AccumulativeSummary   = gsm_tbl_accumulative_summary(folds),    # res1
     IterationAccumulative = gsm_tbl_iteration_accumulative(folds),  # res2
     BestKPerIteration     = gsm_tbl_iteration_metrics(folds),
@@ -358,6 +588,11 @@ gsm_export_tables <- function(result, dataset, summary = NULL, top_n = 10) {
     RankedFeatures        = gsm_tbl_ranked_features(folds, dataset),
     FeatureRRA            = gsm_tbl_feature_rra(folds)
   )
+  # Timings sheet — inserted right after RunSummary when timings were recorded.
+  timing_tbl <- gsm_tbl_timings(timings)
+  if (!is.null(timing_tbl)) {
+    tbls <- append(tbls, list(Timings = timing_tbl), after = 1L)
+  }
   # De novo discovery results, when a gsm_detect() run is attached.
   if (!is.null(result$detect)) {
     tbls$RobustGenes           <- result$detect$robust_genes
@@ -397,6 +632,7 @@ gsm_write_xlsx <- function(tables, file) {
 # Map table keys to original-G-S-M-style CSV file names.
 .csv_name_map <- c(
   RunSummary            = "RunSummary",
+  Timings               = "Timings",
   AccumulativeSummary   = "res1_AccumulativePerformance",
   IterationAccumulative = "res2_AllIterations",
   BestKPerIteration     = "BestK_per_iteration",
@@ -438,7 +674,11 @@ gsm_write_csv_zip <- function(tables, file, prefix = "GSM") {
   }
   # Zip with relative paths so the archive has flat CSVs.
   old <- setwd(dir); on.exit(setwd(old), add = TRUE)
-  utils::zip(zipfile = file, files = basename(paths), flags = "-q")
+  if (requireNamespace("zip", quietly = TRUE)) {
+    zip::zipr(zipfile = file, files = basename(paths))
+  } else {
+    utils::zip(zipfile = file, files = basename(paths), flags = "-q")
+  }
   invisible(file)
 }
 
@@ -478,12 +718,13 @@ gsm_export_filename <- function(summary, dataset = NULL, ext = "xlsx") {
 #' @param summary Optional run metadata.
 #' @param format "xlsx" or "csv".
 #' @param top_n Top-N cutoff for the group ranking table.
+#' @param timings Optional named list of elapsed-time values (see [gsm_tbl_timings()]).
 #' @return `file`, invisibly.
 #' @export
 gsm_export <- function(result, dataset, file, summary = NULL,
-                       format = c("xlsx", "csv"), top_n = 10) {
+                       format = c("xlsx", "csv"), top_n = 10, timings = NULL) {
   format <- match.arg(format)
-  tbls <- gsm_export_tables(result, dataset, summary, top_n = top_n)
+  tbls <- gsm_export_tables(result, dataset, summary, top_n = top_n, timings = timings)
   if (format == "xlsx") gsm_write_xlsx(tbls, file)
   else gsm_write_csv_zip(tbls, file)
 }

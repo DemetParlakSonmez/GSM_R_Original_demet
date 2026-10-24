@@ -19,38 +19,50 @@ Sys.setenv(
 # Increase maximum file upload size to 500MB
 options(shiny.maxRequestSize = 500 * 1024^2)
 
+# Dev mode: locate the package root robustly.
+# Strategy 1: caller set GSMR_PKG_DIR (e.g. run-live.sh or our launcher).
+# Strategy 2: walk up from this file's own path (works when source()'d).
+# Strategy 3: walk up from getwd() — works when runApp() is called from the repo root.
+.find_pkg_root <- function() {
+  candidates <- c(
+    Sys.getenv("GSMR_PKG_DIR", unset = NA_character_),
+    tryCatch({
+      frames <- sys.frames()
+      ofiles <- Filter(Negate(is.null),
+                       lapply(frames, function(f) f$ofile))
+      if (length(ofiles))
+        normalizePath(file.path(dirname(ofiles[[length(ofiles)]]), "..", ".."))
+      else NA_character_
+    }, error = function(e) NA_character_),
+    normalizePath(file.path(getwd(), "inst", "shiny", ".."), mustWork = FALSE),
+    normalizePath(file.path(getwd(), "..", ".."), mustWork = FALSE),
+    normalizePath(getwd(), mustWork = FALSE)
+  )
+  for (d in candidates) {
+    if (!is.na(d) && nzchar(d) && file.exists(file.path(d, "DESCRIPTION"))) return(d)
+  }
+  NULL
+}
+app_dir <- .find_pkg_root()
+
 # Load gsmR — either installed or via pkgload
-if (requireNamespace("gsmR", quietly = TRUE)) {
+if (!is.null(app_dir)) {
+  pkgload::load_all(app_dir, quiet = TRUE)
+} else if (requireNamespace("gsmR", quietly = TRUE)) {
   library(gsmR)
 } else {
-  # Dev mode: load from package root
-  app_dir <- normalizePath(file.path(dirname(sys.frame(1)$ofile %||% "."), "..", ".."))
-  if (file.exists(file.path(app_dir, "DESCRIPTION"))) {
-    pkgload::load_all(app_dir)
-  }
+  warning("gsmR package not found and could not locate package root for dev mode. ",
+          "Run the app from the package root directory.")
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Discover example datasets (repo-level example_*_files/ + bundled toy data)
 # ══════════════════════════════════════════════════════════════════════════════
-.launch_dir <- getOption("gsmR.launch_dir", getwd())
-.example_input_dir <- getOption(
-  "gsmR.example_input_dir",
-  file.path(.launch_dir, "example_input_files")
-)
-.example_groups_dir <- getOption(
-  "gsmR.example_groups_dir",
-  file.path(.launch_dir, "example_grouping_files")
-)
-
-# Fallback to package root (../../) if running from inst/shiny and dirs are missing
-if (!dir.exists(.example_input_dir)) {
-  .pkg_root <- normalizePath(file.path(dirname(sys.frame(1)$ofile %||% "."), "..", ".."), mustWork = FALSE)
-  if (dir.exists(file.path(.pkg_root, "example_input_files"))) {
-    .example_input_dir <- file.path(.pkg_root, "example_input_files")
-    .example_groups_dir <- file.path(.pkg_root, "example_grouping_files")
-  }
-}
+.launch_dir <- getOption("gsmR.launch_dir", if (!is.null(app_dir)) app_dir else getwd())
+.example_input_dir  <- getOption("gsmR.example_input_dir",
+                                 file.path(.launch_dir, "example_input_files"))
+.example_groups_dir <- getOption("gsmR.example_groups_dir",
+                                 file.path(.launch_dir, "example_grouping_files"))
 
 .list_examples <- function(dir, pattern) {
   if (!dir.exists(dir)) {
@@ -988,8 +1000,9 @@ ui <- page_navbar(
               layout_columns(
                 col_widths = c(6, 6),
                 selectInput("g_bridge_precision", "Estimator",
-                  choices = c("glasso" = "glasso", "mb / fast" = "mb")
-                ),
+                            choices = c("glasso (prior-weighted, \u2264250 genes)" = "glasso",
+                                        "jgl (fused joint estimation)" = "jgl",
+                                        "mb / fast (large p)" = "mb")),
                 numericInput("g_bridge_max_genes", "Max genes", value = 1000, min = 10, step = 50)
               ),
               tags$details(
@@ -1344,8 +1357,9 @@ ui <- page_navbar(
                 )
               ),
               selectInput("gsm_grp_bridge_precision", "Estimator",
-                choices = c("mb / fast" = "mb", "glasso" = "glasso")
-              ),
+                          choices = c("mb / fast" = "mb",
+                                      "glasso (prior-weighted, \u2264250 genes)" = "glasso",
+                                      "jgl (fused joint)" = "jgl")),
               selectInput("gsm_grp_bridge_prefilter", "Speed pre-filter",
                 choices = c(
                   "Top-variance" = "variance",
@@ -1806,6 +1820,13 @@ ui <- page_navbar(
                 tags$b("Save to workspace folder"), ", or open the app in a real browser tab."
               ),
               uiOutput("save_disk_path")
+            ),
+            conditionalPanel(
+              condition = "output.has_timings",
+              card(full_screen = TRUE,
+                card_header("\U23F1\UFE0F Recorded Step Runtimes (Exported to 'Timings' Excel sheet)"),
+                DTOutput("export_timings_table")
+              )
             )
           )
         )
@@ -2064,7 +2085,15 @@ server <- function(input, output, session) {
     detect = NULL,
 
     # Group significance (permutation test)
-    permtest = NULL
+    permtest      = NULL,
+
+    # Operation timings (collected across the session, written to Timings sheet)
+    # Named list with fields:
+    #   data_load      : seconds for Data -> Load Selected Example
+    #   grouping_load  : seconds for Grouping -> Prior knowledge -> Load grouping
+    #   bridge_runs    : named list (estimator -> seconds) for BRIDGE runs
+    #   gsm_run        : seconds for GSM -> Run Analysis
+    timings       = list()
   )
 
   # Chunked pre-scoring worker state (drives the live main-panel view).
@@ -2299,7 +2328,13 @@ server <- function(input, output, session) {
 
   observeEvent(input$btn_load, {
     req(input$expr_file)
+    t0_data <- Sys.time()
     load_into_rv(input$expr_file$datapath)
+    elapsed_data <- as.numeric(difftime(Sys.time(), t0_data, units = "secs"))
+    timings_cur <- rv$timings %||% list()
+    timings_cur$data_load <- elapsed_data
+    timings_cur$data_load_detail <- "Load & Validate (Uploaded expression)"
+    rv$timings <- timings_cur
   })
 
   # ── Filter summary (before/after gene counts) ────────────────────────────
@@ -2332,7 +2367,13 @@ server <- function(input, output, session) {
       )
       return()
     }
+    t0_data <- Sys.time()
     load_into_rv(expr_path)
+    elapsed_data <- as.numeric(difftime(Sys.time(), t0_data, units = "secs"))
+    timings_cur <- rv$timings %||% list()
+    timings_cur$data_load <- elapsed_data
+    timings_cur$data_load_detail <- "Load Selected Example"
+    rv$timings <- timings_cur
   })
 
   # Value boxes
@@ -3109,126 +3150,25 @@ server <- function(input, output, session) {
           ds_run <- rv$dataset
           if (!is.null(rv$dataset$grouping_spec) &&
             identical(rv$dataset$grouping_spec$method, "bridge")) {
-            withProgress(
-              message = "BRIDGE grouping (training samples only)...",
-              value = 0.2,
-              {
-                ds_run$groups <- grouping_for_fold(rv$dataset, rv$train_idx)
-              }
-            )
-            validate(need(
-              length(ds_run$groups) > 0,
-              "BRIDGE derived no groups on the training split. Lower tau or min group size."
-            ))
-            ds_run$params$n_groups <- length(ds_run$groups)
-            rv$prescore_groups <- NULL # preview pre-scoring no longer applies
-          }
-
-          # Candidate groups: all groups, or the pre-scored top set (auto if needed).
-          scope_all <- identical(input$score_scope, "all")
-          auto_prescored <- FALSE
-          if (scope_all) {
-            candidates <- ds_run$groups
-          } else {
-            candidates <- rv$prescore_groups
-            if (is.null(candidates)) {
-              candidates <- pre_score_groups(ds_run, rv$train_idx,
-                method = input$prescore_method,
-                top_percent = input$top_percent,
-                q_threshold = as.numeric(input$prescore_q_threshold %||% 0.05)
-              )
-              auto_prescored <- TRUE
-            }
-          }
-
-          results <- list()
-          final_model <- NULL
-          best_k <- NA_integer_
-          n_shaved <- NA_integer_
-          withProgress(message = "Gene shaving + scoring + accumulative modeling...", value = 0, {
-            # Optional leakage-free z-score (fit on train, applied to all columns).
-            expr_use <- if (isTRUE(input$normalize_z)) {
-              zscore_fit_apply(rv$dataset$expr, rv$train_idx)
-            } else {
-              rv$dataset$expr
-            }
-
-            # Phase I — training-only gene shaving (Welch t-test; FDR or top-k).
-            if (isTRUE(input$shave_genes)) {
-              keep_genes <- shave_genes(expr_use, rv$dataset$labels,
-                rv$train_idx,
-                alpha = input$fdr_alpha,
-                method = input$shave_method %||% "fdr",
-                top_k = input$shave_k %||% 100
-              )
-              candidates <- shave_groups(candidates, keep_genes)
-              n_shaved <- length(keep_genes)
-              validate(need(
-                length(candidates) > 0,
-                "No groups survived gene shaving — relax the FDR threshold or raise Top-K."
-              ))
-            }
-            K <- min(input$n_top_groups, length(candidates))
-
-            # Phase II — score each candidate (mean Accuracy, k-fold CV, TRAIN only) -> rank.
-            scores <- numeric(length(candidates))
-            names(scores) <- names(candidates)
-            for (i in seq_along(candidates)) {
-              gname <- names(candidates)[i]
-              setProgress(0.5 * i / length(candidates),
-                detail = sprintf("Scoring %s (%d/%d)", gname, i, length(candidates))
-              )
-              scores[i] <- do.call(score_group_train, c(
-                list(
-                  expr = expr_use, labels = rv$dataset$labels,
-                  genes = candidates[[gname]], train_idx = rv$train_idx,
-                  method = input$score_method
-                ), score_args
-              ))
-              results[[gname]] <- list(accuracy = scores[i])
-            }
-            ranked <- names(sort(scores, decreasing = TRUE))
-
-            # Phase III — accumulative top-1..K; skip k that add no new features.
-            acc_rows <- list()
-            best_model <- NULL
-            prev_features <- 0L
-            for (k in seq_len(K)) {
-              setProgress(0.5 + 0.5 * k / K,
-                detail = sprintf("Modeling top-%d / %d groups", k, K)
-              )
-              sub <- candidates[ranked[seq_len(k)]]
-              if (length(unique(unlist(sub))) == prev_features) next
-              prev_features <- length(unique(unlist(sub)))
-              m <- do.call(build_model, c(
-                list(
-                  expr = expr_use, labels = rv$dataset$labels,
-                  top_groups = sub, train_idx = rv$train_idx,
-                  method = input$score_method
-                ), score_args
-              ))
-              acc_rows[[length(acc_rows) + 1L]] <- data.frame(
-                k = k, group_added = ranked[k], n_features = length(m$features),
-                Accuracy = m$metrics$Accuracy, Sensitivity = m$metrics$Sensitivity,
-                Specificity = m$metrics$Specificity, Precision = m$metrics$Precision,
-                F_measure = m$metrics$F_measure, Cohens_kappa = m$metrics$Cohens_kappa,
-                AUC = m$metrics$AUC %||% NA_real_,
-                stringsAsFactors = FALSE
-              )
-              m$.k <- k
-              if (is.null(best_model) || m$metrics$Accuracy > best_model$metrics$Accuracy) {
-                best_model <- m
-              }
-            }
-            final_model <- best_model
-            best_k <- best_model$.k
-            rv$accumulative <- do.call(rbind, acc_rows)
-            rv$final_model <- final_model
-            rv$score_results <- results
-            rv$scored <- TRUE
-            session$sendCustomMessage("enableBtn", "btn_score")
-            setProgress(1, detail = "Done!")
+          t0_bridge_single <- Sys.time()
+          withProgress(message = "BRIDGE grouping (training samples only)...",
+                       value = 0.2, {
+            ds_run$groups <- grouping_for_fold(rv$dataset, rv$train_idx)
           })
+          elapsed_bridge_single <- as.numeric(difftime(Sys.time(), t0_bridge_single, units = "secs"))
+          timings_cur <- rv$timings %||% list()
+          br <- timings_cur$bridge_runs %||% list()
+          est_lbl <- rv$dataset$grouping_spec$args$precision %||% "bridge"
+          if (is.null(br[[est_lbl]])) {
+            br[[est_lbl]] <- elapsed_bridge_single
+            timings_cur$bridge_runs <- br
+            rv$timings <- timings_cur
+          }
+          validate(need(length(ds_run$groups) > 0,
+                        "BRIDGE derived no groups on the training split. Lower tau or min group size."))
+          ds_run$params$n_groups <- length(ds_run$groups)
+          rv$prescore_groups <- NULL   # preview pre-scoring no longer applies
+        }
 
           n <- length(candidates)
           rv$score_summary <- list(
@@ -3338,14 +3278,172 @@ server <- function(input, output, session) {
             mc$n, mc$cores
           ), type = "message", duration = 5)
         }
-      },
-      error = function(e) {
-        showNotification(paste("\u274C Error during execution:", e$message),
-          type = "error",
-          duration = 10
+
+        results <- list()
+        final_model <- NULL; best_k <- NA_integer_; n_shaved <- NA_integer_
+        withProgress(message = "Gene shaving + scoring + accumulative modeling...", value = 0, {
+          # Optional leakage-free z-score (fit on train, applied to all columns).
+          expr_use <- if (isTRUE(input$normalize_z))
+            zscore_fit_apply(rv$dataset$expr, rv$train_idx) else rv$dataset$expr
+
+          # Phase I — training-only gene shaving (Welch t-test; FDR or top-k).
+          if (isTRUE(input$shave_genes)) {
+            keep_genes <- shave_genes(expr_use, rv$dataset$labels,
+                                      rv$train_idx, alpha = input$fdr_alpha,
+                                      method = input$shave_method %||% "fdr",
+                                      top_k = input$shave_k %||% 100)
+            candidates <- shave_groups(candidates, keep_genes)
+            n_shaved <- length(keep_genes)
+            validate(need(length(candidates) > 0,
+                          "No groups survived gene shaving — relax the FDR threshold or raise Top-K."))
+          }
+          K <- min(input$n_top_groups, length(candidates))
+
+          # Phase II — score each candidate (mean F1, k-fold CV, TRAIN only) -> rank.
+          scores <- numeric(length(candidates)); names(scores) <- names(candidates)
+          for (i in seq_along(candidates)) {
+            gname <- names(candidates)[i]
+            setProgress(0.5 * i / length(candidates),
+                        detail = sprintf("Scoring %s (%d/%d)", gname, i, length(candidates)))
+            scores[i] <- do.call(score_group_train, c(
+              list(expr = expr_use, labels = rv$dataset$labels,
+                   genes = candidates[[gname]], train_idx = rv$train_idx,
+                   method = input$score_method), score_args))
+            # Store gene list so export tables can report N_genes in BRIDGE mode
+            # (dataset$groups is empty when grouping is BRIDGE per-fold)
+            results[[gname]] <- list(accuracy = scores[i],
+                                     genes = candidates[[gname]])
+          }
+          ranked <- names(sort(scores, decreasing = TRUE))
+
+          # Phase III — accumulative top-1..K; skip k that add no new features.
+          acc_rows <- list(); best_model <- NULL; prev_features <- 0L
+          for (k in seq_len(K)) {
+            setProgress(0.5 + 0.5 * k / K,
+                        detail = sprintf("Modeling top-%d / %d groups", k, K))
+            sub <- candidates[ranked[seq_len(k)]]
+            if (length(unique(unlist(sub))) == prev_features) next
+            prev_features <- length(unique(unlist(sub)))
+            m <- do.call(build_model, c(
+              list(expr = expr_use, labels = rv$dataset$labels,
+                   top_groups = sub, train_idx = rv$train_idx,
+                   method = input$score_method), score_args))
+            acc_rows[[length(acc_rows) + 1L]] <- data.frame(
+              k = k, group_added = ranked[k], n_features = length(m$features),
+              Accuracy = m$metrics$Accuracy, Sensitivity = m$metrics$Sensitivity,
+              Specificity = m$metrics$Specificity, Precision = m$metrics$Precision,
+              F_measure = m$metrics$F_measure, Cohens_kappa = m$metrics$Cohens_kappa,
+              AUC = m$metrics$AUC %||% NA_real_,
+              stringsAsFactors = FALSE)
+            m$.k <- k
+            if (is.null(best_model) || m$metrics$F_measure > best_model$metrics$F_measure)
+              best_model <- m
+          }
+          final_model      <- best_model
+          best_k           <- best_model$.k
+          rv$accumulative  <- do.call(rbind, acc_rows)
+          rv$final_model   <- final_model
+          rv$score_results <- results
+          rv$scored <- TRUE
+        session$sendCustomMessage("enableBtn", "btn_score")
+          setProgress(1, detail = "Done!")
+        })
+
+        n <- length(candidates)
+        rv$score_summary <- list(
+          mode = "single",
+          dataset_name = rv$dataset_name %||% "dataset",
+          modeling = sprintf("accumulative top-1..%d (best k = %d)", K, best_k),
+          best_k = best_k,
+          gene_shaving = if (isTRUE(input$shave_genes))
+            if (identical(input$shave_method, "topk"))
+              sprintf("Welch t-test, top-%d genes (%d kept)", input$shave_k %||% 100L, n_shaved)
+            else
+              sprintf("Welch t-test + BH FDR %.3g (%d genes kept)", input$fdr_alpha, n_shaved)
+            else "off",
+          scope = if (scope_all) "All groups (pre-score filter skipped)"
+                  else if (auto_prescored) "Top pre-scored groups (auto, on the fly)"
+                  else "Top pre-scored groups",
+          classifier = classifier_label(input$score_method),
+          params = format_params(score_args),
+          ranking = "group classifier score (train-only)",
+          n_candidates = n,
+          n_groups_scored = K,
+          n_features = length(final_model$features),
+          prescore_method = if (scope_all) "skipped" else input$prescore_method,
+          prescore_top_percent = input$top_percent,
+          seed = input$score_seed,
+          dataset = sprintf("%d samples x %d genes",
+                            rv$dataset$params$n_samples, rv$dataset$params$n_genes)
         )
+        rv$time_score <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+        # Record GSM run timing.
+        timings_cur <- rv$timings %||% list()
+        timings_cur$gsm_run <- rv$time_score
+        rv$timings <- timings_cur
+        showNotification(sprintf("✅ Accumulative top-1..%d done (best k = %d) in %s!",
+                                 K, best_k, format_duration(rv$time_score)),
+                         type = "message")
+      } else {
+        # ── PARALLEL MULTI-FOLD MCCV ────────────────────────────────────────
+        m_method <- if (input$model_method == "same") input$score_method else input$model_method
+        # Determine modeling arguments
+        model_args <- list()
+        if (m_method == "rf") {
+          model_args <- list(ntree = input$rf_ntree)
+        } else if (m_method == "svm") {
+          model_args <- list(kernel = input$svm_kernel, cost = input$svm_cost, gamma = input$svm_gamma)
+        } else if (m_method == "knn") {
+          model_args <- list(k = input$knn_k)
+        } else if (m_method == "xgb") {
+          model_args <- list(nrounds = 100)
+        } else if (m_method %in% c("mlp", "gnn")) {
+          model_args <- build_nn_args(input, m_method)
+        }
+
+        # Scope: "all" groups => keep 100% in each fold's pre-scoring (no filter).
+        scope_all <- identical(input$score_scope, "all")
+        fold_top_pct <- if (scope_all) 100 else input$top_percent
+        mc$scope_all <- scope_all
+        # Hand off to the batched worker so the panel fills live, fold by fold.
+        mc$params <- list(
+          dataset = rv$dataset, train_ratio = input$mccv_train_ratio,
+          pre_score_method = input$prescore_method,
+          pre_score_top_percent = fold_top_pct,
+          score_method = input$score_method, model_method = m_method,
+          score_args = score_args, model_args = model_args,
+          top_n = input$n_top_groups, shave = isTRUE(input$shave_genes),
+          fdr_alpha = input$fdr_alpha,
+          shave_method = input$shave_method %||% "fdr",
+          shave_k = input$shave_k %||% 100,
+          normalize = isTRUE(input$normalize_z),
+          seed = input$score_seed
+        )
+        mc$n      <- input$mccv_iterations
+        mc$cores  <- input$mccv_cores
+        mc$done   <- 0
+        mc$folds  <- vector("list", mc$n)
+        mc$tick   <- 0
+        mc$primed <- FALSE   # first worker tick only paints the live panel
+        mc$t0     <- Sys.time()
+        mc$active <- TRUE
+        # Scheduler state: queue every fold, nothing running yet.
+        mc$running      <- list()
+        mc$queue        <- seq_len(mc$n)
+        mc$started      <- 0
+        mc$fold_started <- list()
+        mc$summary_open <- FALSE
+        mc$last_summary <- NULL
+        # Per-fold live-progress files written by the forked workers.
+        mc$progress_dir <- tempfile("gsm_mccv_")
+        dir.create(mc$progress_dir, showWarnings = FALSE)
+        showNotification(sprintf("🚀 Starting Parallel MCCV: %d folds on %d core(s)…",
+                                 mc$n, mc$cores), type = "message", duration = 5)
       }
-    )
+    }, error = function(e) {
+      showNotification(paste("\u274C Error during execution:", e$message), type = "error",
+                       duration = 10)
+    })
   })
 
   # \u2500\u2500 MCCV worker: run `cores` folds per cycle, stream results, then aggregate
@@ -3392,123 +3490,97 @@ server <- function(input, output, session) {
             }
           }
 
-          # 2) All folds launched AND reaped -> aggregate and finish.
-          if (mc$done >= mc$n && length(mc$running) == 0) {
-            # \u2500\u2500 Finalize: aggregate exactly like run_mccv() \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-            results <- mc$folds
-            ok <- Filter(function(r) !is.null(r) && r$status == "success", results)
-            n_failed <- length(results) - length(ok)
-            if (length(ok) == 0) {
-              mc$active <- FALSE
-              # Collect error messages from failed folds
-              err_msgs <- unique(vapply(results, function(r) {
-                if (is.null(r)) "Fold returned NULL" else r$error_message %||% "Unknown error"
-              }, character(1)))
-              showNotification(
-                paste0(
-                  "\u274c All ", length(results), " MCCV folds failed. Errors: ",
-                  paste(err_msgs, collapse = "; ")
-                ),
-                type = "error", duration = 15
-              )
-              return()
-            }
-            if (n_failed > 0) {
-              showNotification(
-                sprintf(
-                  "\u26a0\ufe0f %d of %d folds failed. Results are based on %d successful folds.",
-                  n_failed, length(results), length(ok)
-                ),
-                type = "warning", duration = 10
-              )
-            }
-            metrics_df <- do.call(rbind, lapply(ok, function(r) as.data.frame(r$metrics)))
-            rv$mccv_results <- list(
-              folds = results,
-              metrics_summary = data.frame(
-                Mean = colMeans(metrics_df, na.rm = TRUE),
-                SD   = apply(metrics_df, 2, stats::sd, na.rm = TRUE)
-              ),
-              raw_metrics = metrics_df
-            )
-            p <- mc$params
-            groups_per_fold <- vapply(ok, function(r) r$n_groups %||% NA_integer_, integer(1))
-            feats_per_fold <- vapply(ok, function(r) r$features_count %||% NA_integer_, integer(1))
-            best_ks <- vapply(ok, function(r) r$best_k %||% NA_integer_, integer(1))
-            best_k_mode <- as.integer(names(sort(table(best_ks), decreasing = TRUE))[1])
-            rv$score_summary <- list(
-              mode = "mccv",
-              modeling = sprintf("accumulative top-1..%d per fold", p$top_n %||% 10),
-              ranking = "group classifier score (train-only)",
-              gene_shaving = if (isTRUE(p$shave)) {
-                mean_shaved <- mean(vapply(
-                  ok, function(r) r$n_shaved_genes %||% NA_real_,
-                  numeric(1)
-                ), na.rm = TRUE)
-                if (identical(p$shave_method, "topk")) {
-                  sprintf(
-                    "Welch t-test, top-%d genes/fold (mean %.0f kept)",
-                    p$shave_k %||% 100L, mean_shaved
-                  )
-                } else {
-                  sprintf(
-                    "Welch t-test + BH FDR %.3g (mean %.0f genes/fold)",
-                    p$fdr_alpha %||% 0.05, mean_shaved
-                  )
-                }
-              } else {
-                "off"
-              },
-              best_k = best_k_mode,
-              dataset_name = rv$dataset_name %||% "dataset",
-              scope = if (isTRUE(mc$scope_all)) {
-                "All groups (pre-score keeps 100%/fold)"
-              } else {
-                "Top pre-scored groups"
-              },
-              classifier = classifier_label(p$score_method),
-              model_classifier = classifier_label(p$model_method),
-              params = format_params(p$score_args),
-              model_params = format_params(p$model_args),
-              n_iterations = mc$n,
-              n_folds_ok = length(ok),
-              cores = mc$cores,
-              train_ratio = p$train_ratio,
-              prescore_method = p$pre_score_method,
-              prescore_top_percent = p$pre_score_top_percent,
-              prescore_q_threshold = if (identical(p$pre_score_method, "zscore")) {
-                sprintf("q < %s", p$pre_score_q_threshold %||% 0.05)
-              } else {
-                NA_character_
-              },
-              groups_per_fold = round(mean(groups_per_fold, na.rm = TRUE), 1),
-              features_per_fold = round(mean(feats_per_fold, na.rm = TRUE), 1),
-              seed = p$seed,
-              dataset = sprintf(
-                "%d samples x %d genes",
-                rv$dataset$params$n_samples, rv$dataset$params$n_genes
-              )
-            )
-            rv$scored <- TRUE
-            rv$time_score <- as.numeric(difftime(Sys.time(), mc$t0, units = "secs"))
-            # Snapshot for the persistent completion banner (stays until dismissed).
-            mc_metrics <- colMeans(metrics_df, na.rm = TRUE)
-            mc$last_summary <- list(
-              n = mc$n, ok = length(ok), failed = n_failed, cores = mc$cores,
-              elapsed = rv$time_score, mean_acc = mc_metrics[["Accuracy"]] %||% NA_real_,
-              metrics = mc_metrics
-            )
-            mc$summary_open <- TRUE
-            mc$active <- FALSE
-            showNotification(
-              sprintf(
-                "\u2705 Parallel MCCV finished %d/%d folds in %s!",
-                length(ok), mc$n, format_duration(rv$time_score)
-              ),
-              type = "message"
-            )
-            return()
-          }
+      # 2) All folds launched AND reaped -> aggregate and finish.
+      if (mc$done >= mc$n && length(mc$running) == 0) {
+        # \u2500\u2500 Finalize: aggregate exactly like run_mccv() \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        results <- mc$folds
+        ok <- Filter(function(r) !is.null(r) && r$status == "success", results)
+        n_failed <- length(results) - length(ok)
+        if (length(ok) == 0) {
+          mc$active <- FALSE
+          # Collect error messages from failed folds
+          err_msgs <- unique(vapply(results, function(r) {
+            if (is.null(r)) "Fold returned NULL" else r$error_message %||% "Unknown error"
+          }, character(1)))
+          showNotification(
+            paste0("\u274c All ", length(results), " MCCV folds failed. Errors: ",
+                   paste(err_msgs, collapse = "; ")),
+            type = "error", duration = 15)
+          return()
+        }
+        if (n_failed > 0) {
+          showNotification(
+            sprintf("\u26a0\ufe0f %d of %d folds failed. Results are based on %d successful folds.",
+                    n_failed, length(results), length(ok)),
+            type = "warning", duration = 10)
+        }
+        metrics_df <- do.call(rbind, lapply(ok, function(r) as.data.frame(r$metrics)))
+        rv$mccv_results <- list(
+          folds = results,
+          metrics_summary = data.frame(
+            Mean = colMeans(metrics_df, na.rm = TRUE),
+            SD   = apply(metrics_df, 2, stats::sd, na.rm = TRUE)
+          ),
+          raw_metrics = metrics_df
+        )
+        p <- mc$params
+        groups_per_fold <- vapply(ok, function(r) r$n_groups %||% NA_integer_, integer(1))
+        feats_per_fold  <- vapply(ok, function(r) r$features_count %||% NA_integer_, integer(1))
+        best_ks <- vapply(ok, function(r) r$best_k %||% NA_integer_, integer(1))
+        best_k_mode <- as.integer(names(sort(table(best_ks), decreasing = TRUE))[1])
+        rv$score_summary <- list(
+          mode = "mccv",
+          modeling = sprintf("accumulative top-1..%d per fold", p$top_n %||% 10),
+          ranking = "group classifier score (train-only)",
+          gene_shaving = if (isTRUE(p$shave)) {
+            mean_shaved <- mean(vapply(ok, function(r) r$n_shaved_genes %||% NA_real_,
+                                       numeric(1)), na.rm = TRUE)
+            if (identical(p$shave_method, "topk"))
+              sprintf("Welch t-test, top-%d genes/fold (mean %.0f kept)",
+                      p$shave_k %||% 100L, mean_shaved)
+            else
+              sprintf("Welch t-test + BH FDR %.3g (mean %.0f genes/fold)",
+                      p$fdr_alpha %||% 0.05, mean_shaved)
+          } else "off",
+          best_k = best_k_mode,
+          dataset_name = rv$dataset_name %||% "dataset",
+          scope = if (isTRUE(mc$scope_all)) "All groups (pre-score keeps 100%/fold)"
+                  else "Top pre-scored groups",
+          classifier = classifier_label(p$score_method),
+          model_classifier = classifier_label(p$model_method),
+          params = format_params(p$score_args),
+          model_params = format_params(p$model_args),
+          n_iterations = mc$n,
+          n_folds_ok = length(ok),
+          cores = mc$cores,
+          train_ratio = p$train_ratio,
+          prescore_method = p$pre_score_method,
+          prescore_top_percent = p$pre_score_top_percent,
+          groups_per_fold = round(mean(groups_per_fold, na.rm = TRUE), 1),
+          features_per_fold = round(mean(feats_per_fold, na.rm = TRUE), 1),
+          seed = p$seed,
+          dataset = sprintf("%d samples x %d genes",
+                            rv$dataset$params$n_samples, rv$dataset$params$n_genes)
+        )
+        rv$scored <- TRUE
+        rv$time_score <- as.numeric(difftime(Sys.time(), mc$t0, units = "secs"))
+        # Record GSM run timing.
+        timings_cur <- rv$timings %||% list()
+        timings_cur$gsm_run <- rv$time_score
+        rv$timings <- timings_cur
+        # Snapshot for the persistent completion banner (stays until dismissed).
+        mc_metrics <- colMeans(metrics_df, na.rm = TRUE)
+        mc$last_summary <- list(
+          n = mc$n, ok = length(ok), failed = n_failed, cores = mc$cores,
+          elapsed = rv$time_score, mean_acc = mc_metrics[["Accuracy"]] %||% NA_real_,
+          metrics = mc_metrics)
+        mc$summary_open <- TRUE
+        mc$active <- FALSE
+        showNotification(sprintf("\u2705 Parallel MCCV finished %d/%d folds in %s!",
+                                 length(ok), mc$n, format_duration(rv$time_score)),
+                         type = "message")
+        return()
+      }
 
           # 3) Keep the core budget full: launch queued folds as background forks
           #    until `cores` are in flight. Each fold is independently seeded
@@ -4370,31 +4442,20 @@ server <- function(input, output, session) {
   })
 
   .do_export <- function(file, fmt) {
-    tryCatch(
-      {
-        tbls <- gsm_export_tables(assemble_result(), rv$dataset, rv$score_summary)
-        if (fmt == "xlsx") {
-          gsm_write_xlsx(tbls, file)
-        } else {
-          prefix <- sprintf(
-            "%s_GSMwith%s",
-            rv$score_summary$dataset_name %||% "dataset",
-            switch(rv$score_summary$classifier %||% "model",
-              "Random Forest" = "RandomForest",
-              "Support Vector Machine" = "SVM",
-              "K-Nearest Neighbors" = "KNN",
-              rv$score_summary$classifier
-            )
-          )
-          gsm_write_csv_zip(tbls, file, prefix = prefix)
-        }
-      },
-      error = function(e) {
-        showNotification(paste("❌ Export failed:", conditionMessage(e)),
-          type = "error", duration = 12
-        )
-        # Write a small note so the download isn't an empty/corrupt file.
-        writeLines(paste("Export failed:", conditionMessage(e)), file)
+    tryCatch({
+      tbls <- gsm_export_tables(assemble_result(), rv$dataset, rv$score_summary,
+                                timings = rv$timings %||% list())
+      if (fmt == "xlsx") {
+        gsm_write_xlsx(tbls, file)
+      } else {
+        prefix <- sprintf("%s_GSMwith%s",
+                          rv$score_summary$dataset_name %||% "dataset",
+                          switch(rv$score_summary$classifier %||% "model",
+                                 "Random Forest" = "RandomForest",
+                                 "Support Vector Machine" = "SVM",
+                                 "K-Nearest Neighbors" = "KNN",
+                                 rv$score_summary$classifier))
+        gsm_write_csv_zip(tbls, file, prefix = prefix)
       }
     )
   }
@@ -4412,28 +4473,29 @@ server <- function(input, output, session) {
   # writes the workbook + CSV bundle into a "gsm_outputs/" folder in the project.
   observeEvent(input$save_disk, {
     req(rv$scored)
-    out_dir <- file.path(getOption("gsmR.launch_dir", getwd()), "gsm_outputs")
-    tryCatch(
-      {
-        dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-        tbls <- gsm_export_tables(assemble_result(), rv$dataset, rv$score_summary)
-        xlsx_f <- file.path(out_dir, gsm_export_filename(rv$score_summary, rv$dataset, "xlsx"))
-        zip_f <- file.path(out_dir, gsm_export_filename(rv$score_summary, rv$dataset, "zip"))
-        gsm_write_xlsx(tbls, xlsx_f)
-        gsm_write_csv_zip(tbls, zip_f,
-          prefix = sub("\\.zip$", "", basename(zip_f))
-        )
-        rv$saved_paths <- c(xlsx_f, zip_f)
-        showNotification(paste0("✅ Saved results to: ", out_dir),
-          type = "message", duration = 12
-        )
-      },
-      error = function(e) {
-        showNotification(paste("❌ Save failed:", conditionMessage(e)),
-          type = "error", duration = 12
-        )
-      }
-    )
+    base_dir <- getOption("gsmR.launch_dir", NULL)
+    if (is.null(base_dir)) {
+      if (file.exists("DESCRIPTION")) base_dir <- getwd()
+      else if (file.exists("../../DESCRIPTION")) base_dir <- normalizePath("../..")
+      else base_dir <- getwd()
+    }
+    out_dir <- file.path(base_dir, "gsm_outputs")
+    tryCatch({
+      dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+      tbls   <- gsm_export_tables(assemble_result(), rv$dataset, rv$score_summary,
+                                  timings = rv$timings %||% list())
+      xlsx_f <- file.path(out_dir, gsm_export_filename(rv$score_summary, rv$dataset, "xlsx"))
+      zip_f  <- file.path(out_dir, gsm_export_filename(rv$score_summary, rv$dataset, "zip"))
+      gsm_write_xlsx(tbls, xlsx_f)
+      gsm_write_csv_zip(tbls, zip_f,
+                        prefix = sub("\\.zip$", "", basename(zip_f)))
+      rv$saved_paths <- c(xlsx_f, zip_f)
+      showNotification(paste0("✅ Saved results to: ", out_dir),
+                       type = "message", duration = 12)
+    }, error = function(e) {
+      showNotification(paste("❌ Save failed:", conditionMessage(e)),
+                       type = "error", duration = 12)
+    })
   })
 
   output$save_disk_path <- renderUI({
@@ -4452,6 +4514,18 @@ server <- function(input, output, session) {
     req(rv$scored, rv$time_score)
     lbl <- if (isTRUE(input$run_mccv_mode)) "Parallel MCCV runtime" else "Scoring + model runtime"
     time_banner_ui(rv$time_score, lbl)
+  })
+
+  output$has_timings <- reactive({
+    !is.null(rv$timings) && length(rv$timings) > 0
+  })
+  outputOptions(output, "has_timings", suspendWhenHidden = FALSE)
+
+  output$export_timings_table <- renderDT({
+    req(rv$timings)
+    tbl <- gsm_tbl_timings(rv$timings)
+    req(!is.null(tbl) && nrow(tbl) > 0)
+    .dt(tbl, page = 10)
   })
 
   # Single Fold Renderers: Group Scores Table
@@ -4681,25 +4755,21 @@ server <- function(input, output, session) {
     }
     if (is.null(path) || !nzchar(path) || !file.exists(path)) {
       return(showNotification("❌ Expression file not found.", type = "error", duration = 8))
-    }
-    tryCatch(
-      {
-        ed <- withProgress(
-          message = "Loading expression…", value = 0.4,
-          read_expression(path)
-        )
-        rv$expr_data <- ed
-        rv$g_file <- NULL
-        rv$g_bridge <- NULL # clear stale results
-        showNotification(sprintf(
-          "✅ Loaded %d samples × %d genes.",
-          ncol(ed$expr), nrow(ed$expr)
-        ), type = "message")
-      },
-      error = function(e) {
-        showNotification(paste("❌", e$message), type = "error", duration = 10)
-      }
-    )
+    t0_data <- Sys.time()
+    tryCatch({
+      ed <- withProgress(message = "Loading expression…", value = 0.4,
+                         read_expression(path))
+      rv$expr_data <- ed
+      elapsed_data <- as.numeric(difftime(Sys.time(), t0_data, units = "secs"))
+      timings_cur <- rv$timings %||% list()
+      timings_cur$data_load <- elapsed_data
+      timings_cur$data_load_detail <- if (src_upload) "Uploaded expression (Grouping tab)" else "Load Selected Example (Grouping tab)"
+      rv$timings <- timings_cur
+      rv$g_file <- NULL; rv$g_bridge <- NULL           # clear stale results
+      showNotification(sprintf("✅ Loaded %d samples × %d genes.",
+                               ncol(ed$expr), nrow(ed$expr)), type = "message")
+    }, error = function(e)
+      showNotification(paste("❌", e$message), type = "error", duration = 10))
   })
   output$g_data_status <- renderUI({
     if (is.null(rv$expr_data)) {
@@ -4722,30 +4792,24 @@ server <- function(input, output, session) {
   observeEvent(input$g_file_run, {
     req(rv$expr_data)
     src <- input$g_file_source %||% "example"
-    tryCatch(
-      {
-        groups <- if (src == "example") {
-          .g_read_example_groups(input$g_file_example %||% "")
-        } else {
-          if (is.null(input$g_file_upload)) {
-            stop("Upload a grouping file, or choose an example.")
-          }
-          compute_grouping("file",
-            file = input$g_file_upload$datapath,
-            format = input$g_file_format
-          )
-        }
-        rv$g_file <- list(groups = groups)
-        showNotification(sprintf("✅ Loaded %d group(s).", length(groups)), type = "message")
-      },
-      error = function(e) {
-        showNotification(paste("❌", e$message), type = "error", duration = 10)
+    t0_gload <- Sys.time()
+    tryCatch({
+      groups <- if (src == "example") {
+        .g_read_example_groups(input$g_file_example %||% "")
+      } else {
+        if (is.null(input$g_file_upload))
+          stop("Upload a grouping file, or choose an example.")
+        compute_grouping("file", file = input$g_file_upload$datapath,
+                         format = input$g_file_format)
       }
-    )
-  })
-  output$g_file_valueboxes <- renderUI({
-    req(rv$g_file)
-    .g_valueboxes(rv$g_file$groups, .g_expr())
+      rv$g_file <- list(groups = groups)
+      elapsed_gload <- as.numeric(difftime(Sys.time(), t0_gload, units = "secs"))
+      timings_cur <- rv$timings %||% list()
+      timings_cur$grouping_load <- elapsed_gload
+      rv$timings <- timings_cur
+      showNotification(sprintf("✅ Loaded %d group(s).", length(groups)), type = "message")
+    }, error = function(e)
+      showNotification(paste("❌", e$message), type = "error", duration = 10))
   })
   output$g_file_groups_dt <- renderDT({
     req(rv$g_file)
@@ -4833,12 +4897,10 @@ server <- function(input, output, session) {
       progress_file = pfile
     ), args)
     rv$g_bridge <- NULL
-    gbr$prior <- prior_obj
-    gbr$args <- args
-    gbr$progress_file <- pfile
-    gbr$t0 <- Sys.time()
-    gbr$tick <- 0
-    gbr$active <- TRUE
+    gbr$prior <- prior_obj; gbr$args <- args; gbr$progress_file <- pfile
+    # Capture estimator label and start time for timing records.
+    gbr$estimator <- input$g_bridge_precision %||% "unknown"
+    gbr$t0 <- Sys.time(); gbr$tick <- 0; gbr$active <- TRUE
 
     if (.Platform$OS.type != "windows") {
       gbr$job <- parallel::mcparallel(
@@ -4862,8 +4924,15 @@ server <- function(input, output, session) {
     err <- attr(res, "bridge_error")
     if (!is.null(err)) {
       return(showNotification(paste("❌", err), type = "error", duration = 12))
-    }
-    if (length(res) == 0) {
+    # Record timing under the estimator label.
+    elapsed_bridge <- as.numeric(difftime(Sys.time(), gbr$t0, units = "secs"))
+    estimator_lbl  <- gbr$estimator %||% "unknown"
+    timings_cur <- rv$timings %||% list()
+    bridge_runs <- timings_cur$bridge_runs %||% list()
+    bridge_runs[[estimator_lbl]] <- elapsed_bridge
+    timings_cur$bridge_runs <- bridge_runs
+    rv$timings <- timings_cur
+    if (length(res) == 0)
       return(showNotification("BRIDGE produced no groups — lower tau/min size or adjust lambda.",
         type = "warning", duration = 10
       ))
@@ -5138,23 +5207,20 @@ server <- function(input, output, session) {
     method <- input$gsm_grp_method %||% "file"
 
     if (method == "file") {
-      groups <- tryCatch(
-        {
-          if ((input$gsm_grp_file_source %||% "example") == "example") {
-            .g_read_example_groups(input$gsm_grp_file_example %||% "")
-          } else {
-            if (is.null(input$gsm_grp_file_upload)) stop("Upload a grouping file, or choose an example.")
-            compute_grouping("file", file = input$gsm_grp_file_upload$datapath, format = "auto")
-          }
-        },
-        error = function(e) {
-          showNotification(paste("❌", e$message), type = "error", duration = 10)
-          NULL
+      t0_gload <- Sys.time()
+      groups <- tryCatch({
+        if ((input$gsm_grp_file_source %||% "example") == "example")
+          .g_read_example_groups(input$gsm_grp_file_example %||% "")
+        else {
+          if (is.null(input$gsm_grp_file_upload)) stop("Upload a grouping file, or choose an example.")
+          compute_grouping("file", file = input$gsm_grp_file_upload$datapath, format = "auto")
         }
-      )
-      if (is.null(groups)) {
-        return()
-      }
+      }, error = function(e) { showNotification(paste("❌", e$message), type = "error", duration = 10); NULL })
+      if (is.null(groups)) return()
+      elapsed_gload <- as.numeric(difftime(Sys.time(), t0_gload, units = "secs"))
+      timings_cur <- rv$timings %||% list()
+      timings_cur$grouping_load <- elapsed_gload
+      rv$timings <- timings_cur
       .commit_dataset(groups, NULL, sprintf("prior-knowledge (%d groups)", length(groups)))
     } else { # BRIDGE — commit the deferred spec (re-derived per fold)
       src <- input$gsm_grp_bridge_prior %||% "none"
@@ -5618,59 +5684,49 @@ server <- function(input, output, session) {
       )
       return()
     }
-    tryCatch(
-      {
-        dir.create(dirname(save_path), showWarnings = FALSE, recursive = TRUE)
-        session_data <- list(
-          expr_data = rv$expr_data, groups = rv$groups,
-          dataset = rv$dataset, dataset_name = rv$dataset_name,
-          loaded = rv$loaded,
-          collapse_result = rv$collapse_result, collapsed = rv$collapsed,
-          time_collapse = rv$time_collapse,
-          prescore_groups = rv$prescore_groups, prescore_scores = rv$prescore_scores,
-          prescore_nkeep = rv$prescore_nkeep, prescored = rv$prescored,
-          train_idx = rv$train_idx, time_prescore = rv$time_prescore,
-          score_results = rv$score_results, final_model = rv$final_model,
-          accumulative = rv$accumulative, mccv_results = rv$mccv_results,
-          scored = rv$scored, score_summary = rv$score_summary,
-          time_score = rv$time_score,
-          detect = rv$detect, permtest = rv$permtest,
-          mccv_group_summary = rv$mccv_group_summary,
-          settings = list(
-            score_method = input$score_method, run_mccv_mode = input$run_mccv_mode,
-            mccv_iterations = input$mccv_iterations, model_method = input$model_method,
-            mccv_train_ratio = input$mccv_train_ratio, score_scope = input$score_scope,
-            n_top_groups = input$n_top_groups, score_seed = input$score_seed,
-            top_percent = input$top_percent, normalize = input$normalize,
-            detect_mode = input$detect_mode, detect_top_genes = input$detect_top_genes,
-            detect_min_freq = input$detect_min_freq, detect_resolution = input$detect_resolution,
-            detect_nboot = input$detect_nboot
-          ),
-          saved_at = Sys.time(), r_version = R.version.string,
-          gsmR_version = tryCatch(as.character(utils::packageVersion("gsmR")),
-            error = function(e) "unknown"
-          )
-        )
-        saveRDS(session_data, save_path)
-        output$save_session_status <- renderUI(
-          tags$div(
-            class = "text-success mt-2",
-            sprintf("\u2705 Session saved to %s", save_path)
-          )
-        )
-        showNotification(sprintf("\U0001F4BE Session saved to %s", save_path),
-          type = "message", duration = 5
-        )
-      },
-      error = function(e) {
-        output$save_session_status <- renderUI(
-          tags$div(
-            class = "text-danger mt-2",
-            paste0("\u274c Save failed: ", conditionMessage(e))
-          )
-        )
-      }
-    )
+    tryCatch({
+      dir.create(dirname(save_path), showWarnings = FALSE, recursive = TRUE)
+      session_data <- list(
+        expr_data = rv$expr_data, groups = rv$groups,
+        dataset = rv$dataset, dataset_name = rv$dataset_name,
+        loaded = rv$loaded,
+        collapse_result = rv$collapse_result, collapsed = rv$collapsed,
+        time_collapse = rv$time_collapse,
+        prescore_groups = rv$prescore_groups, prescore_scores = rv$prescore_scores,
+        prescore_nkeep = rv$prescore_nkeep, prescored = rv$prescored,
+        train_idx = rv$train_idx, time_prescore = rv$time_prescore,
+        score_results = rv$score_results, final_model = rv$final_model,
+        accumulative = rv$accumulative, mccv_results = rv$mccv_results,
+        scored = rv$scored, score_summary = rv$score_summary,
+        time_score = rv$time_score,
+        timings = rv$timings,
+        detect = rv$detect, permtest = rv$permtest,
+        mccv_group_summary = rv$mccv_group_summary,
+        settings = list(
+          score_method = input$score_method, run_mccv_mode = input$run_mccv_mode,
+          mccv_iterations = input$mccv_iterations, model_method = input$model_method,
+          mccv_train_ratio = input$mccv_train_ratio, score_scope = input$score_scope,
+          n_top_groups = input$n_top_groups, score_seed = input$score_seed,
+          top_percent = input$top_percent, normalize = input$normalize,
+          detect_mode = input$detect_mode, detect_top_genes = input$detect_top_genes,
+          detect_min_freq = input$detect_min_freq, detect_resolution = input$detect_resolution,
+          detect_nboot = input$detect_nboot
+        ),
+        saved_at = Sys.time(), r_version = R.version.string,
+        gsmR_version = tryCatch(as.character(utils::packageVersion("gsmR")),
+                                error = function(e) "unknown")
+      )
+      saveRDS(session_data, save_path)
+      output$save_session_status <- renderUI(
+        tags$div(class = "text-success mt-2",
+                 sprintf("\u2705 Session saved to %s", save_path)))
+      showNotification(sprintf("\U0001F4BE Session saved to %s", save_path),
+                       type = "message", duration = 5)
+    }, error = function(e) {
+      output$save_session_status <- renderUI(
+        tags$div(class = "text-danger mt-2",
+                 paste0("\u274c Save failed: ", conditionMessage(e))))
+    })
   })
 
   observeEvent(input$load_session_file, {
@@ -5763,6 +5819,56 @@ server <- function(input, output, session) {
             paste0("\u274c Failed to load session: ", conditionMessage(e))
           )
         )
+        return()
+      }
+      # Restore all reactive values
+      rv$expr_data        <- sess$expr_data
+      rv$groups           <- sess$groups
+      rv$dataset          <- sess$dataset
+      rv$dataset_name     <- sess$dataset_name
+      rv$loaded           <- sess$loaded %||% FALSE
+      rv$collapse_result  <- sess$collapse_result
+      rv$collapsed        <- sess$collapsed %||% FALSE
+      rv$time_collapse    <- sess$time_collapse
+      rv$prescore_groups  <- sess$prescore_groups
+      rv$prescore_scores  <- sess$prescore_scores
+      rv$prescore_nkeep   <- sess$prescore_nkeep
+      rv$prescored        <- sess$prescored %||% FALSE
+      rv$train_idx        <- sess$train_idx
+      rv$time_prescore    <- sess$time_prescore
+      rv$score_results    <- sess$score_results
+      rv$final_model      <- sess$final_model
+      rv$accumulative     <- sess$accumulative
+      rv$mccv_results     <- sess$mccv_results
+      rv$scored           <- sess$scored %||% FALSE
+      rv$score_summary    <- sess$score_summary
+      rv$time_score       <- sess$time_score
+      rv$timings          <- sess$timings %||% list()
+      rv$detect           <- sess$detect
+      rv$permtest         <- sess$permtest
+      rv$mccv_group_summary <- sess$mccv_group_summary
+      # Restore UI settings
+      s <- sess$settings
+      if (!is.null(s)) {
+        if (!is.null(s$score_method))      updateRadioButtons(session, "score_method", selected = s$score_method)
+        if (!is.null(s$run_mccv_mode))     updateCheckboxInput(session, "run_mccv_mode", value = s$run_mccv_mode)
+        if (!is.null(s$mccv_iterations))   updateNumericInput(session, "mccv_iterations", value = s$mccv_iterations)
+        if (!is.null(s$model_method))      updateSelectInput(session, "model_method", selected = s$model_method)
+        if (!is.null(s$mccv_train_ratio))  updateSliderInput(session, "mccv_train_ratio", value = s$mccv_train_ratio)
+        if (!is.null(s$score_scope))       updateRadioButtons(session, "score_scope", selected = s$score_scope)
+        if (!is.null(s$n_top_groups))      updateNumericInput(session, "n_top_groups", value = s$n_top_groups)
+        if (!is.null(s$score_seed))        updateNumericInput(session, "score_seed", value = s$score_seed)
+        if (!is.null(s$normalize))         updateCheckboxInput(session, "normalize", value = s$normalize)
+        if (!is.null(s$detect_mode))       updateRadioButtons(session, "detect_mode", selected = s$detect_mode)
+        if (!is.null(s$detect_top_genes))  updateNumericInput(session, "detect_top_genes", value = s$detect_top_genes)
+        if (!is.null(s$detect_min_freq))   updateNumericInput(session, "detect_min_freq", value = s$detect_min_freq)
+        if (!is.null(s$detect_resolution)) updateNumericInput(session, "detect_resolution", value = s$detect_resolution)
+        if (!is.null(s$detect_nboot))      updateNumericInput(session, "detect_nboot", value = s$detect_nboot)
+      }
+      # Update Discover module picker if detection results exist
+      if (!is.null(sess$detect) && !is.null(sess$detect$modules)) {
+        updateSelectInput(session, "detect_module_pick",
+                          choices = sess$detect$modules$Module)
       }
     )
   })
