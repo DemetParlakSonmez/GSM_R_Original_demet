@@ -155,7 +155,7 @@ gsm_batch_snapshot <- function(st) {
 #' @keywords internal
 .gsm_batch_admit <- function(st) {
   while (length(st$window) < st$max_resident && st$next_ds <= length(st$names)) {
-    nm <- st$names[st$next_ds]
+    nm   <- st$names[st$next_ds]
     path <- st$expression_files[[nm]]
     st$next_ds <- st$next_ds + 1L
     ok <- tryCatch({
@@ -164,6 +164,22 @@ gsm_batch_snapshot <- function(st) {
       ds <- gsm_dataset(ed$expr, ed$labels, st$groups,
                         min_group_size = st$p$min_group_size,
                         max_group_size = st$p$max_group_size)
+
+      # Minimum group sayısı kontrolü: pre-score top% sonrası en az 3 grup kalmalı
+      min_groups_needed <- max(3L, ceiling(ds$params$n_groups * st$p$top_percent / 100))
+      if (ds$params$n_groups < min_groups_needed || ds$params$n_groups < 3L) {
+        warn_msg <- sprintf(
+          "Skipped '%s': only %d groups after size filtering (need >= %d for top_percent=%g%%)",
+          nm, ds$params$n_groups, min_groups_needed, st$p$top_percent
+        )
+        st$status[nm] <- "skipped"
+        st$errors[nm] <- warn_msg
+        st$manifest[[length(st$manifest) + 1L]] <-
+          .gsm_manifest_row(nm, "skipped", error = warn_msg)
+        gsm_batch_log(st, sprintf("SKIPPED '%s': %s", nm, warn_msg))
+        next
+      }
+
       st$exprdata[[nm]] <- ed
       st$loaded[[nm]]   <- ds
       st$folds[[nm]]    <- vector("list", st$n_iter)
@@ -188,6 +204,7 @@ gsm_batch_snapshot <- function(st) {
   }
 }
 
+
 #' Launch queued fold jobs until the core budget is full
 #' @keywords internal
 .gsm_batch_launch <- function(st) {
@@ -202,6 +219,7 @@ gsm_batch_snapshot <- function(st) {
         mccv_run_fold(ds, f, train_ratio = p$mccv_train_ratio,
                       pre_score_method = p$prescore_method,
                       pre_score_top_percent = p$top_percent,
+                      pre_score_q_threshold = p$prescore_q_threshold %||% 0.05,
                       score_method = p$score_method,
                       model_method = st$actual_model_method,
                       score_args = st$score_args, model_args = st$model_args,

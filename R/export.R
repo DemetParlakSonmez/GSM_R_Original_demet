@@ -691,7 +691,7 @@ gsm_write_csv_zip <- function(tables, file, prefix = "GSM") {
 gsm_export_filename <- function(summary, dataset = NULL, ext = "xlsx") {
   s <- summary %|null|% list()
   clean <- function(x) gsub("[^A-Za-z0-9]+", "", as.character(x))
-  dn <- clean(s$dataset_name %|null|% "dataset")
+  dn  <- clean(s$dataset_name %|null|% "dataset")
   # Accept either an internal code ("rf") or a friendly label ("Random Forest").
   clf <- clean(switch(as.character(s$classifier %|null|% "model"),
                       "Random Forest" = "RandomForest",
@@ -699,7 +699,16 @@ gsm_export_filename <- function(summary, dataset = NULL, ext = "xlsx") {
                       "K-Nearest Neighbors" = "KNN",
                       .clf_label(s$classifier %|null|% "model")))
   mode <- if (isTRUE(grepl("MCCV|mccv", s$mode %|null|% ""))) "MCCV" else "Single"
-  sprintf("%s_GSMwith%s_%s_%s.%s", dn, clf, mode, format(Sys.Date()), ext)
+  # Append zscore q-threshold tag when applicable
+  zscore_tag <- if (identical(s$prescore_method, "zscore") &&
+                    !is.null(s$prescore_q_threshold) &&
+                    !is.na(s$prescore_q_threshold)) {
+    qt_clean <- gsub("[^0-9]", "", as.character(s$prescore_q_threshold))
+    sprintf("_zscore_q%s", qt_clean)
+  } else {
+    ""
+  }
+  sprintf("%s_GSMwith%s_%s%s_%s.%s", dn, clf, mode, zscore_tag, format(Sys.Date()), ext)
 }
 
 #' Build and write result tables in one call (console convenience)
