@@ -32,20 +32,28 @@ shave_genes <- function(expr, labels, train_idx, alpha = 0.05,
   method <- match.arg(method)
   genes <- rownames(expr)
   wt <- welch_t_vector(expr, labels, train_idx)
-  if (is.null(wt)) return(genes)                 # not two-class / too few samples
+  if (is.null(wt)) {
+    return(genes)
+  } # not two-class / too few samples
 
   p <- 2 * stats::pt(-abs(wt$t), df = wt$df)
-  p[!is.finite(wt$t) | !is.finite(wt$df)] <- 1   # constant genes -> not significant
+  p[!is.finite(wt$t) | !is.finite(wt$df)] <- 1 # constant genes -> not significant
 
   if (method == "topk") {
     k <- max(1L, min(as.integer(top_k), length(genes)))
-    ord <- order(p, -abs(wt$t))                  # smallest p first, |t| tie-break
+    ord <- order(p, -abs(wt$t)) # smallest p first, |t| tie-break
     return(genes[ord[seq_len(k)]])
   }
 
   p_adj <- stats::p.adjust(p, method = "BH")
-  keep <- genes[is.finite(p_adj) & p_adj < alpha]
-  if (length(keep) < 2) genes else keep          # safe fallback
+
+  sig_idx <- which(is.finite(p_adj) & p_adj < alpha)
+  if (length(sig_idx) > max_features) {
+    sig_idx <- sig_idx[order(p_adj[sig_idx])[1:max_features]]
+  }
+
+  keep <- genes[sig_idx]
+  if (length(keep) < 2) genes else keep # safe fallback
 }
 
 # Vectorised two-class Welch t-test on the training columns.
@@ -53,21 +61,30 @@ shave_genes <- function(expr, labels, train_idx, alpha = 0.05,
 welch_t_vector <- function(expr, labels, train_idx, genes = NULL) {
   if (!is.null(genes)) {
     genes <- intersect(genes, rownames(expr))
-    if (length(genes) == 0) return(NULL)
+    if (length(genes) == 0) {
+      return(NULL)
+    }
     expr <- expr[genes, , drop = FALSE]
   }
   y <- droplevels(labels[train_idx])
-  if (nlevels(y) != 2) return(NULL)
+  if (nlevels(y) != 2) {
+    return(NULL)
+  }
   m <- expr[, train_idx, drop = FALSE]
   lev <- levels(y)
   a <- m[, y == lev[1], drop = FALSE]
   b <- m[, y == lev[2], drop = FALSE]
-  na <- ncol(a); nb <- ncol(b)
-  if (na < 2 || nb < 2) return(NULL)
-  ma <- rowMeans(a); mb <- rowMeans(b)
-  va <- matrixStats_rowVars(a); vb <- matrixStats_rowVars(b)
+  na <- ncol(a)
+  nb <- ncol(b)
+  if (na < 2 || nb < 2) {
+    return(NULL)
+  }
+  ma <- rowMeans(a)
+  mb <- rowMeans(b)
+  va <- matrixStats_rowVars(a)
+  vb <- matrixStats_rowVars(b)
   se2 <- va / na + vb / nb
-  t  <- (ma - mb) / sqrt(se2)                    # signed (class1 - class2)
+  t <- (ma - mb) / sqrt(se2) # signed (class1 - class2)
   df <- se2^2 / ((va / na)^2 / (na - 1) + (vb / nb)^2 / (nb - 1))
   list(t = stats::setNames(t, rownames(m)), df = df)
 }
@@ -86,14 +103,18 @@ welch_t_vector <- function(expr, labels, train_idx, genes = NULL) {
 #' @export
 gene_signed_stats <- function(expr, labels, train_idx, universe = NULL) {
   wt <- welch_t_vector(expr, labels, train_idx, genes = universe)
-  if (is.null(wt)) return(NULL)
+  if (is.null(wt)) {
+    return(NULL)
+  }
   wt$t[is.finite(wt$t)]
 }
 
 # Per-row variance without a hard matrixStats dependency.
 matrixStats_rowVars <- function(x) {
   n <- ncol(x)
-  if (n < 2) return(rep(NA_real_, nrow(x)))
+  if (n < 2) {
+    return(rep(NA_real_, nrow(x)))
+  }
   mu <- rowMeans(x)
   rowSums((x - mu)^2) / (n - 1)
 }
